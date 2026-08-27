@@ -126,12 +126,23 @@ a person and their own machine.
 ## Seeing it without booting
 
 ```
-cargo run -p raven-greeter -- --preview /tmp/login.png 1920x1080 [empty|typing|denied|caps]
+cargo run -p raven-greeter -- --preview OUT.png [WIDTHxHEIGHT] [empty|typing|denied|caps]
+                                      [--wallpaper IMAGE.png] [--force]
 ```
 
 Renders one frame to a PNG, on any host, with no compositor and no `ravend`.
 It calls the same `draw` the compositor drives, so it is not a mock — a change
 that breaks the layout breaks the preview the same way.
+
+`OUT.png` is the file to **write**. To see the screen drawn on top of an image,
+that is `--wallpaper`, which is a separate argument on purpose — and an
+existing file is only overwritten if this tool wrote it, checked by a stamp in
+the PNG rather than by the extension. `--force` overrides that.
+
+```
+cargo run -p raven-greeter -- --preview /tmp/login.png 1920x1080 typing \
+    --wallpaper /usr/share/raven/wallpaper.png
+```
 
 ## Building and installing
 
@@ -185,6 +196,50 @@ There is no lockout, only a delay: three free attempts, then exponential backoff
 per account to a 30-second ceiling, cleared by a success and forgotten after
 fifteen minutes of quiet. The machine this runs on is somebody's own computer,
 and the person most likely to be locked out by a lockout policy is its owner.
+
+### Setting a wallpaper
+
+The login screen draws on a flat backdrop unless you give it an image:
+
+```toml
+# /etc/raven/login.toml
+[greeter]
+wallpaper = "/usr/share/raven/wallpaper.png"
+```
+
+`ravend` reads that at startup, so restart it (or reboot) to pick up a change.
+
+**The file must be readable by the `raven-greeter` account.** This is the one
+thing that catches people, and it is a consequence of the split rather than an
+oversight: `ravend` passes the greeter a *path* and never opens the file
+itself, because a root process that opens whatever a config file names is a
+root process that can be pointed somewhere else. The greeter opens it,
+unprivileged. So somewhere like `/usr/share` works and a path inside your home
+directory does not — `raven-greeter` cannot read it, and on an encrypted home
+it does not exist yet at login time.
+
+PNG or JPEG, decided by the file's first bytes rather than its extension. It is
+scaled to cover the screen and cropped from the centre, so its aspect ratio
+need not match the panel, and it is darkened so that the text stays readable
+whatever the picture is — bright photographs included.
+
+Nothing about a wallpaper can stop a login. A missing file, an unreadable one,
+one that is not an image, one too large to decode: each logs a warning and
+leaves the plain backdrop in place. If you set one and get the backdrop, that
+warning says which of those it was. It comes from the greeter rather than from
+`ravend`, but it lands in `ravend`'s output — the greeter's stderr is
+inherited, not piped.
+
+To see the result without rebooting, render it:
+
+```
+cargo run -p raven-greeter -- --preview /tmp/login.png 1920x1080 typing \
+    --wallpaper /usr/share/raven/wallpaper.png
+```
+
+Run as yourself, that reads files the greeter could not, so it tells you the
+image decodes and the screen looks right — not that the permissions are.
+`sudo -u raven-greeter test -r <path>` is the check for that half.
 
 ## What this does not do yet
 

@@ -156,7 +156,8 @@ started. Almost none of that is in the code under test:
   no Wayland connection, and `draw` is smoke-tested at absurd sizes and
   fractional scales because a greeter that panics on an odd screen shows nobody
   a prompt.
-- `--preview` renders a real frame to a PNG on any host.
+- `--preview` renders a real frame to a PNG on any host, optionally over a
+  `--wallpaper`. It refuses to overwrite a file it did not write.
 
 What is left untested by construction is the privilege drop itself, which needs
 root to exercise, and the Wayland glue. `raven-privdrop` covers the half it can:
