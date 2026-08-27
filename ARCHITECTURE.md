@@ -21,6 +21,9 @@ kernel
             │  │                                                      │
             │  │     greeter ── ListUsers ──────────▶ ravend           │
             │  │     greeter ◀─ Users ───────────────                  │
+            │  │     greeter ── Wallpaper ──────────▶ ravend           │
+            │  │     greeter ◀─ path (never pixels) ─                  │
+            │  │       opens and decodes it itself, unprivileged       │
             │  │     greeter ── Authenticate ───────▶ ravend           │
             │  │                                      reads /etc/shadow│
             │  │                                      sha512-crypt     │

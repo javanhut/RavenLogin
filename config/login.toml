@@ -21,6 +21,26 @@ user = "raven-greeter"
 compositor = "huginn"
 command = "raven-greeter"
 
+# An image to draw the login screen on. Unset means the built-in backdrop.
+#
+# PNG or JPEG, decided by the file's contents rather than its extension. It is
+# scaled to cover the screen and cropped from the centre, so its aspect ratio
+# does not have to match the panel's, and it is darkened so that the text on
+# top of it stays readable whatever the picture is.
+#
+# Two things about permissions, because they are the usual reason this
+# silently does nothing:
+#
+#   - The file is opened by the greeter, as the unprivileged account above,
+#     and never by ravend. It has to be world-readable, or at least readable
+#     by that account -- somewhere like /usr/share is right, and a wallpaper
+#     inside somebody's home directory is not going to work.
+#   - Nothing here can stop a login. A path that does not exist, a file that
+#     is not an image, an image too large to decode: each of them logs a
+#     warning and leaves the plain backdrop in place.
+#
+# wallpaper = "/usr/share/raven/wallpaper.png"
+
 # How long to wait for the compositor to bind its Wayland socket. A compositor
 # that exits before binding is noticed immediately; this is the ceiling for one
 # that simply takes a while.

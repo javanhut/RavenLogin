@@ -14,6 +14,7 @@ use raven_greet_proto::User;
 use crate::canvas::{Canvas, Rect};
 use crate::text::{Align, FontWeight, TextRenderer};
 use crate::theme;
+use crate::wallpaper::Wallpaper;
 
 /// How long the caret is on, then off.
 const CARET_PERIOD: Duration = Duration::from_millis(1100);
@@ -67,6 +68,16 @@ pub(crate) struct LoginScreen {
     started: Instant,
     hostname: String,
     os_name: String,
+    /// The image to draw on, if the machine has one. `None` is the built-in
+    /// backdrop, and is the default on a machine that has not configured one.
+    wallpaper: Option<Wallpaper>,
+    /// Whether the last frame actually got a wallpaper under it.
+    ///
+    /// Not the same question as `wallpaper.is_some()`: the blit can be refused
+    /// (see [`Canvas::blit`]), and the secondary text colour has to follow
+    /// what was really drawn rather than what was configured, or a fallback
+    /// frame gets the brighter dim over the plain backdrop.
+    on_wallpaper: bool,
 }
 
 impl LoginScreen {
@@ -83,6 +94,27 @@ impl LoginScreen {
             started: Instant::now(),
             hostname: read_hostname(),
             os_name: read_os_pretty_name(),
+            wallpaper: None,
+            on_wallpaper: false,
+        }
+    }
+
+    /// Draw on `wallpaper` instead of the backdrop, or on the backdrop again
+    /// with `None`.
+    pub(crate) fn set_wallpaper(&mut self, wallpaper: Option<Wallpaper>) {
+        self.wallpaper = wallpaper;
+    }
+
+    /// The colour for text that sits directly on the background.
+    ///
+    /// Text inside the field keeps [`theme::TEXT_DIM`] whatever is behind the
+    /// screen, because the field is an opaque card and the wallpaper never
+    /// reaches it.
+    fn dim(&self) -> theme::Color {
+        if self.on_wallpaper {
+            theme::TEXT_DIM_ON_WALLPAPER
+        } else {
+            theme::TEXT_DIM
         }
     }
 
@@ -223,15 +255,26 @@ impl LoginScreen {
     /// logical pixels and is multiplied by it here, so the login screen is the
     /// same physical size on a HiDPI panel as on a 96dpi one.
     pub(crate) fn draw(
-        &self,
+        &mut self,
         canvas: &mut Canvas<'_>,
         text: &mut TextRenderer,
         scale: f32,
         now: Instant,
     ) {
-        canvas.gradient(theme::BACKDROP, theme::BACKDROP_EDGE);
-
         let (w, h) = (canvas.width(), canvas.height());
+
+        // `&mut self` is here only for this: the scaled wallpaper is cached on
+        // the screen, because this runs on every frame callback and rescaling
+        // a photograph at the refresh rate would be the only expensive thing
+        // the greeter ever did.
+        self.on_wallpaper = match self.wallpaper.as_mut() {
+            Some(wallpaper) => canvas.blit(wallpaper.prepared(w as i32, h as i32)),
+            None => false,
+        };
+        if !self.on_wallpaper {
+            canvas.gradient(theme::BACKDROP, theme::BACKDROP_EDGE);
+        }
+
         let cx = w / 2.0;
         let s = |v: f32| v * scale;
 
@@ -283,7 +326,7 @@ impl LoginScreen {
             after_clock + s(4.0),
             s(theme::DATE_SIZE),
             FontWeight::NORMAL,
-            theme::TEXT_DIM,
+            self.dim(),
             Align::Center,
         );
         after_clock + s(4.0) + s(theme::DATE_SIZE) * 1.25
@@ -457,16 +500,16 @@ impl LoginScreen {
         let (line, color) = if let Some(message) = &self.message {
             (message.text.clone(), message.kind.color())
         } else if self.busy {
-            ("Checking…".to_string(), theme::TEXT_DIM)
+            ("Checking…".to_string(), self.dim())
         } else if self.caps_lock {
             ("Caps Lock is on".to_string(), theme::WARNING)
         } else if self.users.len() > 1 {
             (
                 "Enter to log in · Tab to switch account".to_string(),
-                theme::TEXT_DIM,
+                self.dim(),
             )
         } else {
-            ("Enter to log in".to_string(), theme::TEXT_DIM)
+            ("Enter to log in".to_string(), self.dim())
         };
 
         text.draw(
@@ -510,7 +553,7 @@ impl LoginScreen {
             y,
             size,
             FontWeight::NORMAL,
-            theme::TEXT_DIM,
+            self.dim(),
             Align::Left,
         );
         if fits {
@@ -521,7 +564,7 @@ impl LoginScreen {
                 y,
                 size,
                 FontWeight::NORMAL,
-                theme::TEXT_DIM,
+                self.dim(),
                 Align::Right,
             );
         }
@@ -744,7 +787,7 @@ mod tests {
     #[test]
     fn drawing_survives_absurd_screen_sizes() {
         let mut text = TextRenderer::new();
-        let s = screen();
+        let mut s = screen();
         for (w, h) in [(1, 1), (16, 9), (640, 480), (3840, 2160), (200, 4000)] {
             let mut data = vec![0u8; (w * h * 4) as usize];
             let mut canvas = Canvas::new(&mut data, w, h);
@@ -752,11 +795,78 @@ mod tests {
         }
     }
 
+    /// The same, with a wallpaper under it. This is the path that scales an
+    /// image to the surface, so it is the one with a division by a dimension
+    /// in it -- and a 1x1 screen or a 1x1 wallpaper is where that would show.
+    #[test]
+    fn drawing_on_a_wallpaper_survives_absurd_screen_sizes() {
+        let mut text = TextRenderer::new();
+        let mut s = screen();
+        s.set_wallpaper(Some(Wallpaper::flat(1, 1, 0xFF, 0xFF, 0xFF)));
+        for (w, h) in [(1, 1), (16, 9), (640, 480), (200, 4000)] {
+            let mut data = vec![0u8; (w * h * 4) as usize];
+            let mut canvas = Canvas::new(&mut data, w, h);
+            s.draw(&mut canvas, &mut text, 1.0, Instant::now());
+        }
+    }
+
+    /// A wallpaper must actually reach the frame, and the secondary text must
+    /// follow it. Both are silent failures otherwise: the screen still draws,
+    /// it just draws the wrong thing.
+    #[test]
+    fn a_wallpaper_is_drawn_and_switches_the_dim_colour() {
+        let mut text = TextRenderer::new();
+        let mut s = screen();
+        assert_eq!(s.dim(), theme::TEXT_DIM);
+
+        s.set_wallpaper(Some(Wallpaper::flat(64, 64, 0xFF, 0x00, 0x00)));
+        let mut data = vec![0u8; (64 * 64 * 4) as usize];
+        {
+            let mut canvas = Canvas::new(&mut data, 64, 64);
+            s.draw(&mut canvas, &mut text, 1.0, Instant::now());
+        }
+
+        assert_eq!(s.dim(), theme::TEXT_DIM_ON_WALLPAPER);
+        // A blue wallpaper under the scrim: the corner is nowhere near the
+        // card or the text, so it is still the wallpaper's colour, and blue
+        // is still the channel it leads with.
+        assert!(
+            data[0] > data[2],
+            "the corner is {:?}, which is not a blue wallpaper",
+            &data[..4]
+        );
+    }
+
+    /// Taking the wallpaper away has to put the backdrop back, colour and all.
+    #[test]
+    fn removing_a_wallpaper_restores_the_backdrop() {
+        let mut text = TextRenderer::new();
+        let mut s = screen();
+        s.set_wallpaper(Some(Wallpaper::flat(64, 64, 0xFF, 0x00, 0x00)));
+        s.set_wallpaper(None);
+
+        let mut data = vec![0u8; (64 * 64 * 4) as usize];
+        {
+            let mut canvas = Canvas::new(&mut data, 64, 64);
+            s.draw(&mut canvas, &mut text, 1.0, Instant::now());
+        }
+        assert_eq!(s.dim(), theme::TEXT_DIM);
+        // Within a step of the backdrop rather than equal to it: the gradient
+        // dithers, so the top-left pixel is the backdrop plus or minus the
+        // Bayer perturbation. The point is that it is the backdrop and not the
+        // 0xFF blue the wallpaper was.
+        assert!(
+            data[0].abs_diff(theme::BACKDROP.blue()) <= 1,
+            "the corner is {:?}, which is not the backdrop",
+            &data[..4]
+        );
+    }
+
     /// ...and at a fractional scale factor, which is what a 1.5x display gives.
     #[test]
     fn drawing_survives_fractional_scaling() {
         let mut text = TextRenderer::new();
-        let s = screen();
+        let mut s = screen();
         for scale in [0.5, 1.0, 1.5, 2.0, 3.0] {
             let mut data = vec![0u8; (800 * 600 * 4) as usize];
             let mut canvas = Canvas::new(&mut data, 800, 600);

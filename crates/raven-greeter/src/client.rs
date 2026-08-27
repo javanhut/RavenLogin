@@ -65,6 +65,19 @@ impl Client {
         }
     }
 
+    /// Where the wallpaper is, if the machine has one.
+    ///
+    /// The daemon answers with a path and never opens it; this process does,
+    /// unprivileged. A machine with none configured answers `None`, which is
+    /// the default and not an error.
+    pub(crate) fn wallpaper(&mut self) -> Result<Option<std::path::PathBuf>> {
+        match self.exchange(&Request::Wallpaper)? {
+            Response::Wallpaper { path } => Ok(path.map(std::path::PathBuf::from)),
+            Response::Failed { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected reply to Wallpaper: {other:?}"),
+        }
+    }
+
     /// Try to log in. On [`Attempt::Granted`] the session is already starting
     /// and this process is about to be stopped.
     pub(crate) fn authenticate(&mut self, username: &str, password: String) -> Result<Attempt> {

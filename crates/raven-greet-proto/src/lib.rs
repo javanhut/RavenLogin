@@ -124,6 +124,9 @@ pub struct User {
 pub enum Request {
     /// Who can log in? Answered with [`Response::Users`].
     ListUsers,
+    /// What should the login screen be drawn on? Answered with
+    /// [`Response::Wallpaper`].
+    Wallpaper,
     /// Check this password and, if it is right, start this account's session.
     Authenticate { username: String, secret: Secret },
 }
@@ -134,6 +137,21 @@ pub enum Request {
 pub enum Response {
     Users {
         users: Vec<User>,
+    },
+    /// Where the wallpaper is, if the machine has one configured.
+    ///
+    /// A path and not the pixels. The daemon reads `login.toml` and so is the
+    /// only process that knows what the administrator wrote there, but it must
+    /// not be the process that opens the file: ravend runs as root, and a
+    /// privileged process that opens whatever a config file names is a
+    /// privileged process that can be pointed at something else. The greeter
+    /// opens it, unprivileged, and if it is missing or unreadable *by the
+    /// greeter* then it does not get drawn -- which is the correct outcome and
+    /// not a thing worth failing a login over.
+    ///
+    /// `None` means no wallpaper is configured, which is the default.
+    Wallpaper {
+        path: Option<String>,
     },
     /// The password was right and the session is starting. The greeter should
     /// stop drawing and exit; the daemon is about to take its compositor down.
@@ -255,6 +273,29 @@ mod tests {
         write_message(&mut buffer, &response).expect("writes");
         let decoded: Response = read_message(&mut buffer.as_slice()).expect("reads");
         assert!(matches!(decoded, Response::Users { users } if users.len() == 1));
+    }
+
+    /// The wallpaper exchange, both halves. A path is the only thing in this
+    /// protocol that is neither a name nor a secret, so it is the one worth
+    /// checking survives the trip both ways -- including the `None` a machine
+    /// with no wallpaper answers with, which serializes differently.
+    #[test]
+    fn a_wallpaper_round_trips() {
+        let mut buffer = Vec::new();
+        write_message(&mut buffer, &Request::Wallpaper).expect("writes");
+        let decoded: Request = read_message(&mut buffer.as_slice()).expect("reads");
+        assert!(matches!(decoded, Request::Wallpaper));
+
+        for path in [Some("/usr/share/raven/wallpaper.png".to_string()), None] {
+            let mut buffer = Vec::new();
+            write_message(&mut buffer, &Response::Wallpaper { path: path.clone() })
+                .expect("writes");
+            let decoded: Response = read_message(&mut buffer.as_slice()).expect("reads");
+            match decoded {
+                Response::Wallpaper { path: got } => assert_eq!(got, path),
+                other => panic!("expected Wallpaper, got {other:?}"),
+            }
+        }
     }
 
     /// Several messages down one stream must not run into each other.

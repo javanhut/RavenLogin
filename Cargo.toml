@@ -67,6 +67,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # the rest of Raven uses; `nix` would be a second way to say the same thing.
 rustix = { version = "1.1", default-features = false, features = ["std", "process", "thread", "fs", "net"] }
 
+# Wallpaper decoding, in the greeter and nowhere else.
+#
+# Two narrow decoders rather than `image`: between them PNG and JPEG cover
+# every wallpaper anybody actually has, and `image` would pull a dozen more
+# formats -- and their parsers -- into the one process on the far side of a
+# login prompt. The greeter is already the process that parses fonts and
+# rasterizes glyphs, so this is surface it was built to hold; that is an
+# argument for putting the decoder here rather than in ravend, not an argument
+# for it being free.
+#
+# zune-jpeg drops its default features because those are the SIMD paths. One
+# decode happens per boot, of one image, before anybody has typed anything --
+# there is no throughput here worth a wider unsafe surface.
+png = "0.18"
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+
 # The greeter is a Wayland client, and only the greeter is.
 smithay-client-toolkit = "0.21"
 # Text shaping and rasterization, matching huginn's own choice so the login

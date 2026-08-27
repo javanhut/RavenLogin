@@ -259,6 +259,7 @@ fn greet_inner(
         authenticator,
         limiter,
         greeter.uid,
+        config.greeter.wallpaper.as_deref(),
     );
 
     session::stop(&mut ui, config.session.stop_timeout, "greeter UI");
@@ -275,6 +276,7 @@ fn greet_inner(
 /// One connection at a time. The greeter is the only client, so a queue buys
 /// nothing, and handling connections serially means the rate limiter cannot be
 /// raced by opening two sockets at once.
+#[allow(clippy::too_many_arguments)]
 fn accept_until_login(
     listener: &UnixListener,
     compositor: &mut Child,
@@ -282,16 +284,19 @@ fn accept_until_login(
     authenticator: &Authenticator,
     limiter: &mut RateLimiter,
     greeter_uid: u32,
+    wallpaper: Option<&Path>,
 ) -> Result<Account> {
     let mut last_sweep = Instant::now();
 
     loop {
         match listener.accept() {
-            Ok((stream, _)) => match serve(stream, authenticator, limiter, greeter_uid) {
-                Ok(Some(account)) => return Ok(account),
-                Ok(None) => {}
-                Err(e) => tracing::warn!("greeter connection failed: {e:#}"),
-            },
+            Ok((stream, _)) => {
+                match serve(stream, authenticator, limiter, greeter_uid, wallpaper) {
+                    Ok(Some(account)) => return Ok(account),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("greeter connection failed: {e:#}"),
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => return Err(anyhow::Error::new(e).context("cannot accept on the socket")),
         }
@@ -321,6 +326,7 @@ fn serve(
     authenticator: &Authenticator,
     limiter: &mut RateLimiter,
     greeter_uid: u32,
+    wallpaper: Option<&Path>,
 ) -> Result<Option<Account>> {
     // Who is actually on the other end. The socket's permissions should already
     // guarantee this, but permissions are a property of a path, and a path can
@@ -374,6 +380,22 @@ fn serve(
                     .collect::<Vec<_>>();
                 tracing::info!(count = users.len(), "sending the user list");
                 raven_greet_proto::write_message(&mut writer, &Response::Users { users })?;
+            }
+
+            Request::Wallpaper => {
+                // Straight out of the config and back down the socket. The
+                // daemon does not stat it, does not open it and does not
+                // validate it beyond it being valid UTF-8, because every one
+                // of those would be root touching a path an administrator
+                // named -- which is exactly what this split exists to avoid.
+                // Whether the file is there and whether it decodes are the
+                // greeter's problems, answered unprivileged.
+                let path = wallpaper.and_then(|p| p.to_str()).map(str::to_string);
+                if wallpaper.is_some() && path.is_none() {
+                    tracing::warn!("the configured wallpaper path is not valid UTF-8; ignoring it");
+                }
+                tracing::info!(wallpaper = ?path, "sending the wallpaper path");
+                raven_greet_proto::write_message(&mut writer, &Response::Wallpaper { path })?;
             }
 
             Request::Authenticate { username, secret } => {

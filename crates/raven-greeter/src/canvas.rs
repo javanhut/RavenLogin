@@ -142,6 +142,27 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Replace every pixel with a pre-scaled background.
+    ///
+    /// `pixels` must already be this canvas's exact size, in this canvas's
+    /// layout -- which is what [`crate::wallpaper::Wallpaper::prepared`]
+    /// returns, and the reason the scaling lives there rather than here. All
+    /// this does is the copy, so a wallpapered frame costs one `memcpy` more
+    /// than a plain one.
+    ///
+    /// Returns whether it drew. A mismatched buffer is refused rather than
+    /// partially copied, so the caller can fall back to [`Self::gradient`]:
+    /// half a wallpaper and half an uninitialized frame is worse than no
+    /// wallpaper.
+    #[must_use]
+    pub(crate) fn blit(&mut self, pixels: &[u8]) -> bool {
+        if pixels.len() != self.data.len() {
+            return false;
+        }
+        self.data.copy_from_slice(pixels);
+        true
+    }
+
     /// A filled rounded rectangle.
     ///
     /// `radius` is clamped to half the shorter side, so a "rounded rectangle"

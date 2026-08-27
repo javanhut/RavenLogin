@@ -1,5 +1,10 @@
-//! `raven-greeter --preview out.png [WIDTHxHEIGHT]` — render one frame to a
-//! file and exit.
+//! `raven-greeter --preview OUT.png [WIDTHxHEIGHT] [STATE] [--wallpaper PATH]`
+//! — render one frame to a file and exit.
+//!
+//! `OUT.png` is written, not read. It is the first argument because the flag
+//! is `--preview <where to put it>`, and a wallpaper to render *behind* the
+//! screen is a named `--wallpaper` rather than a fifth positional so that the
+//! two paths cannot be confused for one another.
 //!
 //! The login screen is the one part of this system that cannot be judged by
 //! reading it, and the ordinary way to look at it is to reboot a machine into
@@ -26,10 +31,67 @@ use anyhow::{Context, Result};
 use crate::canvas::Canvas;
 use crate::text::TextRenderer;
 use crate::ui::{LoginScreen, Message, MessageKind};
+use crate::wallpaper::Wallpaper;
 use raven_greet_proto::User;
 
+/// Parse `--preview`'s arguments and render.
+///
+/// `args` is everything after the flag itself.
+pub(crate) fn main(args: &[String]) -> Result<()> {
+    let mut positional = Vec::new();
+    let mut wallpaper: Option<&str> = None;
+
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--wallpaper" => {
+                let path = rest
+                    .next()
+                    .context("--wallpaper needs the path to an image")?;
+                wallpaper = Some(path);
+            }
+            other if other.starts_with("--") => anyhow::bail!("unknown option {other}"),
+            other => positional.push(other),
+        }
+    }
+
+    let path = positional
+        .first()
+        .context("--preview needs a file to write to")?;
+    let (width, height) = positional
+        .get(1)
+        .map_or(Some((1920, 1080)), |s| parse_size(s))
+        .context("the size should look like 1920x1080")?;
+    let state = positional
+        .get(2)
+        .map_or(Some(State::Empty), |s| State::parse(s))
+        .context("the state should be one of: empty, typing, denied, caps")?;
+    if let Some(extra) = positional.get(3) {
+        anyhow::bail!("unexpected argument {extra}");
+    }
+
+    // Unlike at login, a wallpaper that will not load here is a hard error.
+    // The greeter falls back silently because somebody has to be able to log
+    // in; a developer who asked to see an image and got the plain backdrop
+    // instead is owed the reason.
+    let wallpaper = wallpaper
+        .map(|p| Wallpaper::load(Path::new(p)))
+        .transpose()?;
+
+    let path = Path::new(path);
+    render(path, width, height, state, wallpaper)?;
+    tracing::info!(path = %path.display(), width, height, ?state, "preview written");
+    Ok(())
+}
+
 /// Render one frame and write it to `path`.
-pub(crate) fn render(path: &Path, width: i32, height: i32, state: State) -> Result<()> {
+pub(crate) fn render(
+    path: &Path,
+    width: i32,
+    height: i32,
+    state: State,
+    wallpaper: Option<Wallpaper>,
+) -> Result<()> {
     let mut text = TextRenderer::new();
 
     // Stand-in accounts, so a preview on a build host looks like a preview on
@@ -46,6 +108,8 @@ pub(crate) fn render(path: &Path, width: i32, height: i32, state: State) -> Resu
             initial: 'S',
         },
     ]);
+
+    screen.set_wallpaper(wallpaper);
 
     match state {
         State::Empty => {}

@@ -31,6 +31,7 @@ mod preview;
 mod text;
 mod theme;
 mod ui;
+mod wallpaper;
 
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,7 @@ use crate::canvas::Canvas;
 use crate::client::{Attempt, Client};
 use crate::text::TextRenderer;
 use crate::ui::{Action, LoginScreen, Message, MessageKind};
+use crate::wallpaper::Wallpaper;
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -87,23 +89,8 @@ fn run() -> Result<()> {
     // and without ravend. It is how the login screen is iterated on: the
     // alternative is rebooting a machine to look at a colour.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(path) = args
-        .first()
-        .and_then(|a| (a == "--preview").then(|| args.get(1)))
-    {
-        let path = path.context("--preview needs a file to write to")?;
-        let (width, height) = args
-            .get(2)
-            .map_or(Some((1920, 1080)), |s| preview::parse_size(s))
-            .context("the size should look like 1920x1080")?;
-        let state = args
-            .get(3)
-            .map_or(Some(preview::State::Empty), |s| preview::State::parse(s))
-            .context("the state should be one of: empty, typing, denied, caps")?;
-
-        preview::render(std::path::Path::new(path), width, height, state)?;
-        tracing::info!(path, width, height, ?state, "preview written");
-        return Ok(());
+    if args.first().is_some_and(|a| a == "--preview") {
+        return preview::main(&args[1..]);
     }
 
     // Connect to the daemon before touching Wayland. If ravend is not there
@@ -112,6 +99,25 @@ fn run() -> Result<()> {
     let mut daemon = Client::connect()?;
     let users = daemon.list_users().context("cannot get the user list")?;
     tracing::info!(count = users.len(), "accounts available");
+
+    // Every step of this is allowed to fail without taking the login screen
+    // with it -- an unreachable daemon field, a path that is not there, a file
+    // that will not decode. The screen falls back to its backdrop and somebody
+    // can still log in, which is the only requirement a greeter really has.
+    let wallpaper = match daemon.wallpaper() {
+        Ok(Some(path)) => match Wallpaper::load(&path) {
+            Ok(wallpaper) => Some(wallpaper),
+            Err(e) => {
+                tracing::warn!("ignoring the wallpaper: {e:#}");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("cannot ask ravend about the wallpaper: {e:#}");
+            None
+        }
+    };
 
     let conn = Connection::connect_to_env()
         .context("cannot connect to the Wayland display; is WAYLAND_DISPLAY set?")?;
@@ -161,7 +167,11 @@ fn run() -> Result<()> {
         configured: false,
         exit: false,
         ctrl: false,
-        screen: LoginScreen::new(users),
+        screen: {
+            let mut screen = LoginScreen::new(users);
+            screen.set_wallpaper(wallpaper);
+            screen
+        },
         text: TextRenderer::new(),
         daemon,
     };

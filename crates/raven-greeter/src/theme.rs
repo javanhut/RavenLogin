@@ -80,6 +80,37 @@ pub(crate) const BACKDROP: Color = Color::from_argb(0xFF16_161F);
 /// panel showing its own banding, not to be seen as a gradient.
 pub(crate) const BACKDROP_EDGE: Color = Color::from_argb(0xFF0D_0D14);
 
+/// Laid over a wallpaper, and only over a wallpaper.
+///
+/// Every colour in this file was chosen against [`BACKDROP`], and a photograph
+/// is not [`BACKDROP`]. So a wallpaper is darkened toward the backdrop until
+/// text on it is readable again.
+///
+/// The alpha is the whole decision, and the honest worst case is a pure white
+/// photograph. At 78%, [`TEXT`] lands at 5.6:1 against that -- comfortably
+/// past 4.5:1 -- while a wallpaper is still plainly a wallpaper. Going darker
+/// buys another point of contrast and costs the feature its point.
+///
+/// [`TEXT_DIM`] does *not* survive this, which is what
+/// [`TEXT_DIM_ON_WALLPAPER`] exists for; see there.
+pub(crate) const SCRIM: Color = BACKDROP.with_alpha(0xC8);
+
+/// [`TEXT_DIM`], for the date and the footer, when they are sitting on a
+/// scrimmed wallpaper instead of on the backdrop.
+///
+/// [`TEXT_DIM`] is 2.9:1 against [`BACKDROP`], which is fine for secondary
+/// text on a colour this file controls. On a scrimmed *white* photograph it
+/// falls to 1.5:1 and stops being text at all -- and worse, it inverts, going
+/// from lighter-than-background to darker, which no single choice of alpha
+/// fixes. A brighter dim is the fix that works at both ends: this is 3.0:1
+/// against a scrimmed white wallpaper, 7.6:1 against a scrimmed black one,
+/// and still clearly subordinate to [`TEXT`].
+///
+/// Two constants rather than one, because the backdrop case is not broken and
+/// making the date brighter on a machine with no wallpaper would be changing
+/// a screen nobody asked to change.
+pub(crate) const TEXT_DIM_ON_WALLPAPER: Color = Color::from_argb(0xFF8A_93BE);
+
 /// The card the prompt sits on.
 pub(crate) const SURFACE: Color = Color::from_argb(0xFF1A_1B26);
 
@@ -155,6 +186,71 @@ mod tests {
         assert_eq!(c.red(), ACCENT.red());
         assert_eq!(c.green(), ACCENT.green());
         assert_eq!(c.blue(), ACCENT.blue());
+    }
+
+    /// sRGB relative luminance, per WCAG.
+    fn luminance(c: Color) -> f32 {
+        let channel = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.040_45 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.red()) + 0.7152 * channel(c.green()) + 0.0722 * channel(c.blue())
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        let (lighter, darker) = if a > b { (a, b) } else { (b, a) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// A wallpaper of solid `value`, with [`SCRIM`] over it.
+    fn scrimmed(value: u8) -> Color {
+        let alpha = f32::from(SCRIM.alpha()) / 255.0;
+        let mix = |over: u8| (f32::from(value) * (1.0 - alpha) + f32::from(over) * alpha) as u8;
+        Color::from_argb(
+            0xFF00_0000
+                | (u32::from(mix(SCRIM.red())) << 16)
+                | (u32::from(mix(SCRIM.green())) << 8)
+                | u32::from(mix(SCRIM.blue())),
+        )
+    }
+
+    /// The scrim exists to make a photograph safe to put text on. These are
+    /// the numbers its documentation claims; if somebody retunes it, this is
+    /// what should stop them shipping an unreadable login screen.
+    ///
+    /// White and black stand in for the extremes of any real wallpaper: the
+    /// scrim is a uniform blend, so every photograph in between lands between
+    /// these two.
+    #[test]
+    fn text_stays_readable_on_any_wallpaper() {
+        for value in [0x00, 0x80, 0xFF] {
+            let background = scrimmed(value);
+
+            let primary = contrast(TEXT, background);
+            assert!(
+                primary >= 4.5,
+                "TEXT on a scrimmed 0x{value:02X} wallpaper is {primary:.2}:1"
+            );
+
+            let secondary = contrast(TEXT_DIM_ON_WALLPAPER, background);
+            assert!(
+                secondary >= 3.0,
+                "the dim text on a scrimmed 0x{value:02X} wallpaper is {secondary:.2}:1"
+            );
+        }
+    }
+
+    /// The wallpaper dim has to still read as secondary, or the date competes
+    /// with the clock above it.
+    #[test]
+    fn the_wallpaper_dim_is_still_dimmer_than_the_text() {
+        assert!(luminance(TEXT_DIM_ON_WALLPAPER) < luminance(TEXT));
+        assert!(luminance(TEXT_DIM_ON_WALLPAPER) > luminance(TEXT_DIM));
     }
 
     #[test]

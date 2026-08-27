@@ -13,7 +13,7 @@
 //! image built by `raven-install`. That matters more than it sounds: the
 //! configuration for logging in must not be a thing you can be locked out by.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -46,6 +46,14 @@ pub(crate) struct Greeter {
     pub compositor: String,
     /// The greeter UI binary.
     pub command: String,
+    /// An image to draw the login screen on, or `None` for the built-in
+    /// backdrop.
+    ///
+    /// The daemon does no more than pass this along -- it never opens it. See
+    /// [`raven_greet_proto::Response::Wallpaper`] for why that separation is
+    /// the point rather than an accident, and note the consequence: the file
+    /// has to be readable by the greeter's account, not by root.
+    pub wallpaper: Option<PathBuf>,
     /// How long to wait for the compositor's Wayland socket to appear before
     /// giving up on it.
     ///
@@ -62,6 +70,7 @@ impl Default for Greeter {
             user: "raven-greeter".to_string(),
             compositor: "huginn".to_string(),
             command: "raven-greeter".to_string(),
+            wallpaper: None,
             wayland_timeout: Duration::from_secs(10),
         }
     }
