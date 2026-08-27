@@ -23,13 +23,32 @@ use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCach
 use crate::canvas::Canvas;
 use crate::theme::Color;
 
-/// The family name to ask for, and what to fall back to.
+/// The family names to ask for, best first.
 ///
-/// fontdb matches on the family name recorded in the font file. The Nerd Font
-/// build registers under this name; the plain upstream build registers as
-/// "JetBrains Mono", so both are tried before giving up on a specific face and
-/// letting the fallback chain pick.
-const FAMILIES: &[&str] = &["JetBrainsMono Nerd Font", "JetBrains Mono"];
+/// fontdb matches on the family name recorded in the font file's `name` table,
+/// which is emphatically not the file name. The four files RavenLinux ships are
+/// called `JetBrainsMonoNerdFontMono-*.ttf` and register as:
+///
+/// ```text
+/// nameID 1  (family)              JetBrainsMono NFM
+/// nameID 16 (typographic family)  JetBrainsMono Nerd Font Mono
+/// ```
+///
+/// So neither "JetBrainsMono Nerd Font" nor "JetBrains Mono" matches them —
+/// the Nerd Font patcher abbreviates *Mono* builds to `NFM`, and the `Mono`
+/// suffix on the typographic name is not optional. Asking for the wrong string
+/// does not fail loudly; fontdb silently falls back to whatever it finds first,
+/// and the login screen renders in some other face entirely.
+///
+/// The list covers the two names the shipped files actually use, then the
+/// non-Mono Nerd Font build and plain upstream JetBrains Mono, in case somebody
+/// swaps the files in `RavenLinux/fonts/` for a different variant.
+const FAMILIES: &[&str] = &[
+    "JetBrainsMono NFM",
+    "JetBrainsMono Nerd Font Mono",
+    "JetBrainsMono Nerd Font",
+    "JetBrains Mono",
+];
 
 /// How text is placed against the `x` it is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,10 +93,25 @@ impl TextRenderer {
 
         match &family {
             Some(name) => tracing::info!(font = %name, "using font"),
-            None => tracing::warn!(
-                tried = ?FAMILIES,
-                "none of the expected fonts are installed; falling back to whatever fontdb finds"
-            ),
+            None => {
+                // List what *is* there. The failure mode this warning exists
+                // for is a family name that is subtly wrong rather than a font
+                // that is missing, and "none of these matched" without saying
+                // what was on offer sends you looking for an uninstalled font
+                // that is in fact installed under another name.
+                let mut available: Vec<String> = available;
+                available.sort_unstable();
+                available.dedup();
+                let shown: Vec<&String> = available.iter().take(24).collect();
+                tracing::warn!(
+                    tried = ?FAMILIES,
+                    available = ?shown,
+                    total_available = available.len(),
+                    "none of the expected fonts are installed; falling back to whatever \
+                     fontdb finds. If one of the names above looks like the intended font, \
+                     FAMILIES in text.rs is what needs correcting -- not the font package"
+                );
+            }
         }
 
         Self {
@@ -230,6 +264,43 @@ mod tests {
         assert!(
             data.chunks_exact(4).any(|p| p[3] != 0),
             "drawing text should have marked some pixels"
+        );
+    }
+
+    /// If a JetBrains Mono is installed, `FAMILIES` must match it.
+    ///
+    /// This is the test the font-name bug got past. Asking for a name no font
+    /// registers under does not fail: fontdb quietly falls back, and the login
+    /// screen renders in some unrelated face that nobody notices until they
+    /// look at a screenshot. The four files RavenLinux ships are named
+    /// `JetBrainsMonoNerdFontMono-*.ttf` but register as `JetBrainsMono NFM`,
+    /// so the obvious guesses -- "JetBrains Mono", "JetBrainsMono Nerd Font" --
+    /// both miss.
+    ///
+    /// Conditional rather than absolute, so it does not fail on a build host
+    /// with no fonts at all: the invariant is "we do not miss a JetBrains Mono
+    /// that is present", not "one is present".
+    #[test]
+    fn an_installed_jetbrains_mono_is_not_missed() {
+        let renderer = TextRenderer::new();
+        let installed: Vec<String> = FontSystem::new()
+            .db()
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+            .filter(|name| {
+                name.replace(' ', "")
+                    .to_lowercase()
+                    .contains("jetbrainsmono")
+            })
+            .collect();
+
+        if installed.is_empty() {
+            return;
+        }
+        assert!(
+            renderer.family.is_some(),
+            "a JetBrains Mono is installed under {installed:?}, but FAMILIES matched none of \
+             them: {FAMILIES:?}. Add the real name -- do not assume the font is missing."
         );
     }
 
