@@ -4,9 +4,11 @@
 # Idempotent. Run it again after a rebuild to replace the binaries without
 # touching the account or a config file you have edited.
 #
-# What it does NOT do is wire ravend into raven-init -- that means disabling the
-# getty on tty1, which is the thing you would want back if this goes wrong. See
-# README.md, "Wiring it to raven-init".
+# What it does NOT do is wire ravend into raven-init on an image whose init
+# predates the branch that looks for this binary -- that means disabling the
+# getty on tty1, which is the thing you would want back if it goes wrong. A
+# current RavenLinux needs none of it: init starts ravend because it is here.
+# See README.md, "Wiring it to raven-init".
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr}"
@@ -77,10 +79,28 @@ else
     echo "ok    installed ${SYSCONFDIR}/raven/login.toml"
 fi
 
+# --- the wallpaper directories ---------------------------------------------
+#
+# Empty, and nothing is installed into them. The greeter draws
+# /usr/share/wallpaper/set/wallpaper.<ext> when login.toml names no wallpaper of
+# its own, and huginn draws the same file behind the desktop -- so the
+# directories are the contract, and an image goes in them rather than being
+# named in a config file. scripts/try-wallpaper.sh writes both halves.
+install -d -m 0755 "${PREFIX}/share/wallpaper" "${PREFIX}/share/wallpaper/set"
+echo "ok    ${PREFIX}/share/wallpaper and set/ exist"
+
 cat <<NEXT
 
-Installed. Two things left, and neither is done for you because both are how
-you would get back in if this goes wrong:
+Installed. Whether anything is left depends on the init on this machine.
+
+A RavenLinux built since raven-init learned to look for ravend needs nothing:
+it starts this daemon in place of the autologin session because the binary is
+here, and 'raven.graphics=wayland' on the kernel cmdline is now correct rather
+than something to avoid. 'grep ravend' over the boot log says which you have --
+"Found ravend; the graphical session starts behind a login screen".
+
+An older init does not look for it, and then two things are left. Neither is
+done for you, because both are how you would get back in if this goes wrong:
 
   1. Add the service block in etc/raven/init-service.toml to
      ${SYSCONFDIR}/raven/init.toml
@@ -89,5 +109,9 @@ you would get back in if this goes wrong:
      greeter's compositor needs that VT. Leave getty-tty2 enabled -- that is
      the way back in.
 
-Then reboot. Make sure you can log in on tty2 before you rely on this.
+Either way, you can try the greeter before committing to it, from anywhere:
+
+  sudo openvt -sw -- ./scripts/try-wallpaper.sh run
+
+Then reboot, and make sure you can log in on tty2 before you rely on this.
 NEXT

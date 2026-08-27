@@ -46,8 +46,15 @@ pub(crate) struct Greeter {
     pub compositor: String,
     /// The greeter UI binary.
     pub command: String,
-    /// An image to draw the login screen on, or `None` for the built-in
-    /// backdrop.
+    /// An image to draw the login screen on, overriding whatever the machine
+    /// has set.
+    ///
+    /// `None` -- the default -- does not mean the plain backdrop. It means the
+    /// greeter falls back to `/usr/share/wallpaper/set`, the wallpaper the
+    /// machine is actually using and the one huginn draws behind the desktop,
+    /// so that leaving this unset is what makes the login screen and the
+    /// session look like the same computer. Set it only to make this screen
+    /// differ from that.
     ///
     /// The daemon does no more than pass this along -- it never opens it. See
     /// [`raven_greet_proto::Response::Wallpaper`] for why that separation is

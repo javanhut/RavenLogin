@@ -28,7 +28,7 @@
 //! so bytes are `[B, G, R, A]` -- rather than in the decoder's RGBA. The swap
 //! happens once, here, instead of on every pixel of every blit.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -55,6 +55,62 @@ const MAX_PIXELS: usize = 64 * 1_000_000;
 /// the area check while still being nothing anybody meant to set as a
 /// wallpaper.
 const MAX_DIMENSION: usize = 32_768;
+
+/// Where a machine keeps the wallpaper somebody has chosen.
+///
+/// `/usr/share/wallpaper` is the library of images an installation ships or
+/// collects. `set/` holds the one that is currently on, under the name
+/// `wallpaper` with whatever extension the image arrived with -- an extension
+/// which is a label for humans and still not what decides the format, since
+/// [`decode`] reads that out of the first bytes either way. A symlink into the
+/// library counts, because this follows them.
+///
+/// Compiled in rather than made another key in `login.toml`, deliberately.
+/// This is the path huginn draws on the desktop too, so it is a contract
+/// between the login screen and the session that follows it rather than a
+/// preference belonging to either -- and a machine that wants a *different*
+/// picture on the login screen specifically already has `wallpaper =` to say
+/// so, which still wins over this.
+const SET_DIR: &str = "/usr/share/wallpaper/set";
+
+/// The basename of the active wallpaper inside [`SET_DIR`].
+const SET_STEM: &str = "wallpaper";
+
+/// The wallpaper this machine has set, if it has one.
+///
+/// Consulted only when `login.toml` names no wallpaper of its own. Every
+/// failure here is silence rather than a warning, which is the opposite of how
+/// a configured path is treated and is the point: a path an administrator
+/// wrote down and got wrong is worth complaining about, and a directory nobody
+/// has put anything in is the ordinary state of a machine that never set one.
+pub(crate) fn installed() -> Option<PathBuf> {
+    let entries = std::fs::read_dir(SET_DIR).ok()?;
+    let found = choose(
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            // Follows symlinks, so `set/wallpaper.jpg -> ../cliff.jpg` is a
+            // file by this test and a directory called `wallpaper.d` is not.
+            .filter(|path| path.is_file()),
+    )?;
+    tracing::info!(path = %found.display(), "using the wallpaper this machine has set");
+    Some(found)
+}
+
+/// Pick the active wallpaper out of the names in [`SET_DIR`].
+///
+/// Split from [`installed`] so the rule is testable without a filesystem.
+/// Sorted, because `read_dir` yields whatever order the filesystem feels like
+/// and a directory holding two of these should not mean a wallpaper that
+/// changes between boots. More than one `wallpaper.*` in `set/` is a mistake
+/// however it is resolved; sorting at least makes it the same mistake twice.
+fn choose(entries: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = entries
+        .filter(|path| path.file_stem().is_some_and(|stem| stem == SET_STEM))
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
 
 /// A decoded wallpaper, and the scaled copy last asked for.
 pub(crate) struct Wallpaper {
@@ -417,6 +473,50 @@ fn to_canvas_order(src: &[u8], width: u32, height: u32, channels: usize) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| Path::new(SET_DIR).join(n)).collect()
+    }
+
+    #[test]
+    fn any_extension_is_the_wallpaper() {
+        for name in ["wallpaper.png", "wallpaper.jpg", "wallpaper.jpeg"] {
+            let picked = choose(paths(&[name]).into_iter());
+            assert_eq!(picked, Some(Path::new(SET_DIR).join(name)), "{name}");
+        }
+    }
+
+    /// The extension is a label, so a file that never got one is still the
+    /// wallpaper -- `decode` reads the format out of the bytes regardless.
+    #[test]
+    fn no_extension_is_still_the_wallpaper() {
+        assert_eq!(
+            choose(paths(&["wallpaper"]).into_iter()),
+            Some(Path::new(SET_DIR).join("wallpaper"))
+        );
+    }
+
+    #[test]
+    fn other_names_are_not() {
+        assert_eq!(choose(paths(&["cliff_arch_sea.jpg", "README"]).into_iter()), None);
+        assert_eq!(choose(paths(&["wallpaper.old.png"]).into_iter()), None);
+    }
+
+    /// `read_dir` order is the filesystem's business, and a login screen that
+    /// picks a different picture on alternate boots is a bug report nobody
+    /// can reproduce.
+    #[test]
+    fn two_wallpapers_resolve_the_same_way_every_time() {
+        let forwards = choose(paths(&["wallpaper.png", "wallpaper.jpg"]).into_iter());
+        let backwards = choose(paths(&["wallpaper.jpg", "wallpaper.png"]).into_iter());
+        assert_eq!(forwards, backwards);
+        assert_eq!(forwards, Some(Path::new(SET_DIR).join("wallpaper.jpg")));
+    }
+
+    #[test]
+    fn an_empty_directory_has_no_wallpaper() {
+        assert_eq!(choose(std::iter::empty()), None);
+    }
 
     /// A 2x2 image: red, green / blue, white.
     fn checker() -> Image {

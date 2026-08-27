@@ -149,7 +149,14 @@ pub enum Response {
     /// greeter* then it does not get drawn -- which is the correct outcome and
     /// not a thing worth failing a login over.
     ///
-    /// `None` means no wallpaper is configured, which is the default.
+    /// `None` means `login.toml` names no wallpaper, which is the default and
+    /// is not the end of the question: the greeter then looks at
+    /// `/usr/share/wallpaper/set`, which is where the machine keeps the
+    /// wallpaper somebody chose and what the session compositor draws behind
+    /// the desktop. That lookup is deliberately the greeter's and not the
+    /// daemon's -- it is a fixed path being read by the process that has to be
+    /// able to read it anyway, so routing it through a root process that then
+    /// hands the answer back would add a privileged step and no check.
     Wallpaper {
         path: Option<String>,
     },

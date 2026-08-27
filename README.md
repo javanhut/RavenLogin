@@ -157,23 +157,32 @@ in `video`/`render`/`input`/`seat`), installs both binaries, and installs
 
 ### Wiring it to raven-init
 
-**This step is deliberately not automated**, because it involves turning off
-the getty you would want if it goes wrong.
+**On an image built since RavenLinux wired this up, nothing.**
+`apply_kernel_cmdline_overrides` in RavenLinux's `init/src/main.rs` looks for
+the `ravend` binary when the cmdline says `raven.graphics=wayland`, and starting
+it *replaces* the autologin session rather than racing it. Installing the
+daemon is the whole of turning the login screen on; removing it falls back to
+the autologin session with no file edited either way. `raven.graphics=wayland`
+is now correct to have on the cmdline, which it was not before.
+
+That change also answers the failure case: `ravend` is restarted and there is no
+fallback to the passwordless session, because a password prompt that can be
+skipped by breaking it is not one. The console gettys are the way in to fix it.
+
+On an older image, or any machine whose `raven-init` predates that, it is still
+by hand — and **deliberately not automated by `install.sh`**, because it
+involves turning off the getty you would want if it goes wrong:
 
 1. Append the block in `etc/raven/init-service.toml` to `/etc/raven/init.toml`.
 2. In the same file, set `enabled = false` on `getty-tty1`. The greeter's
    compositor needs that VT; a getty holding it means the two fight.
 3. Leave `getty-tty2` enabled. That is the way back in.
-4. Do **not** put `raven.graphics=wayland` on the kernel cmdline. That flag
-   makes `raven-init` build its own autologin session service, which would then
-   race `ravend` for the GPU and the seat.
+4. Do **not** put `raven.graphics=wayland` on the kernel cmdline. On an init
+   without the branch above, that flag makes `raven-init` build its own
+   autologin session service, which would then race `ravend` for the GPU and
+   the seat.
 
 Reboot, and check you can still log in on tty2 before relying on this.
-
-That fourth point is a wart, and the fix belongs in RavenLinux rather than
-here: `configure_wayland_session` in `init/src/main.rs` should start `ravend`
-when it finds it, and fall back to the autologin session only when it does not.
-That is a change to another repository and is not made by this one.
 
 ## Configuration
 
@@ -199,15 +208,39 @@ and the person most likely to be locked out by a lockout policy is its owner.
 
 ### Setting a wallpaper
 
-The login screen draws on a flat backdrop unless you give it an image:
+The login screen draws whatever wallpaper the machine has set, and a flat
+backdrop when it has none. There is no login-specific setting to change for the
+ordinary case:
+
+```
+/usr/share/wallpaper/                 the library: every image the machine has
+/usr/share/wallpaper/set/wallpaper.*  the one that is on
+```
+
+`set/` holds exactly one file, named `wallpaper` with whatever extension the
+image arrived with — a copy or a symlink into the library, either works. The
+extension is a label: PNG and JPEG are told apart by their first bytes, here as
+everywhere else in this repo, so a JPEG called `.png` still draws.
+
+That path is compiled into the greeter rather than configured, because huginn
+draws the same file behind the desktop. It is the contract that makes the login
+screen and the session you land in look like one computer, and a contract a
+third file can move is not one. `scripts/try-wallpaper.sh set` writes both
+halves; a desktop wallpaper picker would write the same two.
+
+The login screen can still be made to differ, and that is what the config key
+is now for:
 
 ```toml
 # /etc/raven/login.toml
 [greeter]
-wallpaper = "/usr/share/raven/wallpaper.png"
+wallpaper = "/usr/share/raven/login-only.png"
 ```
 
-`ravend` reads that at startup, so restart it (or reboot) to pick up a change.
+Set, it wins outright and `set/` is not consulted. Unset — the default — the
+greeter falls back to `set/`. `ravend` reads the key at startup, so restart it
+(or reboot) to pick up a change to it; the fallback is read by the greeter each
+time it starts, which is every time the login screen appears.
 
 **The file must be readable by the `raven-greeter` account.** This is the one
 thing that catches people, and it is a consequence of the split rather than an
@@ -234,12 +267,67 @@ To see the result without rebooting, render it:
 
 ```
 cargo run -p raven-greeter -- --preview /tmp/login.png 1920x1080 typing \
-    --wallpaper /usr/share/raven/wallpaper.png
+    --wallpaper /usr/share/wallpaper/set/wallpaper.jpg
 ```
 
 Run as yourself, that reads files the greeter could not, so it tells you the
 image decodes and the screen looks right — not that the permissions are.
-`sudo -u raven-greeter test -r <path>` is the check for that half.
+
+For that half, and to see it on the real greeter rather than in a PNG:
+
+```
+sudo ./scripts/try-wallpaper.sh set /path/to/image   # into the library, links
+                                                     # set/, checks the format
+                                                     # and the greeter's access
+sudo ./scripts/try-wallpaper.sh stop                 # the way out
+sudo ./scripts/try-wallpaper.sh revert               # undo everything
+```
+
+`set` deliberately does not write `login.toml`. A path there is an override for
+the login screen alone, so writing one would set the wallpaper everywhere
+except the place you were testing it; if it finds a key already there it says
+so, and `revert` takes it out.
+
+`run` is the one with a constraint on *where* you type it. It refuses to start
+anywhere but a virtual terminal, because a second compositor started inside the
+session it would be fighting is a GPU conflict that reports itself afterwards
+as a driver bug. That check reads the terminal the process is attached to, not
+what is on the screen, and two things are easy to get wrong about the
+difference:
+
+- `sudo chvt 2` moves the **screen** to tty2. It does not move your shell,
+  which is still the pty it always was. Running `run` from that same terminal
+  afterwards fails with `this is /dev/pts/N, not a virtual terminal`.
+- A terminal emulator, a tmux pane, an ssh session, an editor's shell — each
+  hands the commands you type it a pty, wherever you happen to be sitting.
+
+So either switch to a VT, log in at the getty, and type it in *that* shell, or
+have `openvt` allocate one for you, which works from anywhere including inside
+your own session:
+
+```
+sudo openvt -sw -- ./scripts/try-wallpaper.sh run [SECONDS]
+```
+
+`-s` switches to the free VT it finds, `-w` waits for the test to finish, and
+the script sees `/dev/ttyN` and is satisfied.
+
+Look at the greeter; do not log in at it. A successful login is not a no-op —
+`ravend` tears the greeter down and starts a real session, which the watchdog
+below then kills part-way through when the timer runs out.
+
+`run` touches neither `init.toml` nor the kernel cmdline, so a reboot returns
+you to whatever you had before — which is what makes it safe to try before
+committing to the wiring above.
+
+**Ctrl+Alt+Fn does not work from inside a session.** huginn links libseat and
+handles the VT-switch event, but binds nothing to the key that asks for one, so
+the compositor swallows the combination. The greeter also takes an exclusive
+keyboard grab. Between them, a greeter that comes up wrong can leave a keyboard
+with nowhere to go — which is why `run` arms a watchdog that stops the test on
+its own after `SECONDS` (180 by default) whether or not anything is listening.
+`sudo chvt N` is the way to move between VTs by hand; it calls `VT_ACTIVATE`
+directly and does not care what the compositor binds.
 
 ## What this does not do yet
 

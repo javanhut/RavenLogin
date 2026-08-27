@@ -21,7 +21,20 @@ user = "raven-greeter"
 compositor = "huginn"
 command = "raven-greeter"
 
-# An image to draw the login screen on. Unset means the built-in backdrop.
+# An image to draw the login screen on, overriding the machine's own.
+#
+# Leave this alone unless you want the login screen to differ from the desktop.
+# Unset, the greeter draws /usr/share/wallpaper/set/wallpaper.<ext> -- the
+# wallpaper this machine has set, and the same file huginn draws behind the
+# session -- and falls back to the built-in backdrop when there is none. So the
+# ordinary way to change the login screen's picture is to change the machine's
+# wallpaper, not to write a path here.
+#
+# The library lives one directory up:
+#
+#   /usr/share/wallpaper/            every image the machine has
+#   /usr/share/wallpaper/set/        exactly one of them, named `wallpaper`,
+#                                    a copy or a symlink, whatever extension
 #
 # PNG or JPEG, decided by the file's contents rather than its extension. It is
 # scaled to cover the screen and cropped from the centre, so its aspect ratio
@@ -39,7 +52,7 @@ command = "raven-greeter"
 #     is not an image, an image too large to decode: each of them logs a
 #     warning and leaves the plain backdrop in place.
 #
-# wallpaper = "/usr/share/raven/wallpaper.png"
+# wallpaper = "/usr/share/raven/login-only.png"
 
 # How long to wait for the compositor to bind its Wayland socket. A compositor
 # that exits before binding is noticed immediately; this is the ceiling for one

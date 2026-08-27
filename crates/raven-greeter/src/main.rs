@@ -104,20 +104,28 @@ fn run() -> Result<()> {
     // with it -- an unreachable daemon field, a path that is not there, a file
     // that will not decode. The screen falls back to its backdrop and somebody
     // can still log in, which is the only requirement a greeter really has.
-    let wallpaper = match daemon.wallpaper() {
-        Ok(Some(path)) => match Wallpaper::load(&path) {
-            Ok(wallpaper) => Some(wallpaper),
-            Err(e) => {
-                tracing::warn!("ignoring the wallpaper: {e:#}");
-                None
-            }
-        },
-        Ok(None) => None,
+    //
+    // Two places, in this order: what `login.toml` names, and failing that
+    // what the machine has set at /usr/share/wallpaper/set. The configured
+    // path wins because somebody wrote it down for this screen specifically;
+    // the set one is what the desktop behind the login screen draws, so
+    // falling back to it is what makes the two look like one machine.
+    let configured = match daemon.wallpaper() {
+        Ok(path) => path,
         Err(e) => {
             tracing::warn!("cannot ask ravend about the wallpaper: {e:#}");
             None
         }
     };
+    let wallpaper = configured
+        .or_else(wallpaper::installed)
+        .and_then(|path| match Wallpaper::load(&path) {
+            Ok(wallpaper) => Some(wallpaper),
+            Err(e) => {
+                tracing::warn!("ignoring the wallpaper: {e:#}");
+                None
+            }
+        });
 
     let conn = Connection::connect_to_env()
         .context("cannot connect to the Wayland display; is WAYLAND_DISPLAY set?")?;
