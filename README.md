@@ -147,13 +147,21 @@ cargo run -p raven-greeter -- --preview /tmp/login.png 1920x1080 typing \
 ## Building and installing
 
 ```
-cargo build --release
-sudo ./scripts/install.sh
+imlazy install          # cargo build --release, then sudo ./scripts/install.sh
 ```
 
 `install.sh` creates the `raven-greeter` account (nologin shell, no password,
-in `video`/`render`/`input`/`seat`), installs both binaries, and installs
-`config/login.toml` to `/etc/raven/login.toml` if it is not already there.
+in `video`/`render`/`input`/`seat`), installs both binaries, installs
+`config/login.toml` to `/etc/raven/login.toml` if it is not already there, and
+wires the daemon into `raven-init` if this machine's init needs that — see
+below. It is idempotent: run it again after a rebuild.
+
+To remove it again, including the wiring:
+
+```
+imlazy uninstall        # sudo ./scripts/uninstall.sh
+imlazy purge            # the same, plus login.toml and the greeter account
+```
 
 ### Wiring it to raven-init
 
@@ -169,18 +177,27 @@ That change also answers the failure case: `ravend` is restarted and there is no
 fallback to the passwordless session, because a password prompt that can be
 skipped by breaking it is not one. The console gettys are the way in to fix it.
 
-On an older image, or any machine whose `raven-init` predates that, it is still
-by hand — and **deliberately not automated by `install.sh`**, because it
-involves turning off the getty you would want if it goes wrong:
+On an older image, or any machine whose `raven-init` predates that,
+`install.sh` wires it up — it installs `etc/raven/init-service.toml` as a
+drop-in at `/etc/raven/init.d/ravend.toml`, sets `enabled = false` on
+`getty-tty1`, and enables `seatd`. It keeps a backup of every file it edits at
+`<file>.pre-ravend`, and `scripts/uninstall.sh` puts all of it back.
 
-1. Append the block in `etc/raven/init-service.toml` to `/etc/raven/init.toml`.
-2. In the same file, set `enabled = false` on `getty-tty1`. The greeter's
-   compositor needs that VT; a getty holding it means the two fight.
-3. Leave `getty-tty2` enabled. That is the way back in.
-4. Do **not** put `raven.graphics=wayland` on the kernel cmdline. On an init
-   without the branch above, that flag makes `raven-init` build its own
-   autologin session service, which would then race `ravend` for the GPU and
-   the seat.
+Two things it refuses to do, both of which it tells you about:
+
+- **It will not disable the tty1 getty unless `getty-tty2` is enabled.** That
+  getty is the way back in when the greeter will not start, and a machine with
+  neither is one you fix with a USB stick.
+- **It will not wire an old init booted with `raven.graphics=wayland`.** On an
+  init without the branch above, that flag makes `raven-init` build its own
+  autologin session service, which would then race `ravend` for the GPU and the
+  seat. Either update `raven-init`, or take the flag off the kernel cmdline and
+  run the script again. Note that the same flag is what makes an old init turn
+  the tty1 getty off and start `seatd` by itself — so once it is gone, those are
+  exactly the two things `install.sh` has to do, and does.
+
+`WIRE_INIT=0 sudo ./scripts/install.sh` installs the binaries and touches no
+service config at all.
 
 Reboot, and check you can still log in on tty2 before relying on this.
 

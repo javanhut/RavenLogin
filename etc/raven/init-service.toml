@@ -1,8 +1,15 @@
 # The raven-init service definition for ravend.
 #
-# Append this to /etc/raven/init.toml, and disable the getty on tty1 -- the
-# greeter's compositor needs that VT, and a getty holding it means the two
+# scripts/install.sh copies this to /etc/raven/init.d/ravend.toml when the init
+# on the machine needs it, and disables the getty on tty1 at the same time --
+# the greeter's compositor needs that VT, and a getty holding it means the two
 # fight over the console. See README.md, "Wiring it to raven-init".
+#
+# A drop-in rather than an append to init.toml: init reads /etc/raven/init.d/
+# with the same schema, so this file is installed verbatim instead of being
+# spliced into a file somebody else maintains, and uninstalling is a delete.
+# Note the direction of the precedence -- init.toml WINS a name collision, so
+# a hand-written ravend block in init.toml would silently shadow this one.
 #
 # critical = false: a login daemon that cannot start should leave the machine
 # reachable from a console, not take it down. That is also why the getty on
@@ -21,3 +28,26 @@ after = ["udev", "seatd"]
 restart = true
 enabled = true
 critical = false
+
+# Longer than a session's: SIGTERM has to reach the greeter, its compositor,
+# and whatever session is running behind them.
+stop_timeout = 10
+
+# libseat picks a backend at runtime and will try logind first. There is no
+# logind on RavenLinux, and the fallback it lands on without this is the direct
+# one, which needs root and a VT it can take DRM master on -- naming seatd here
+# is what makes the greeter's compositor talk to the daemon in `after` above.
+#
+# An inline table on purpose: everything in this block stays a top-level key of
+# the service, so install.sh can append to the file without the appended key
+# landing inside a sub-table instead of on the service.
+environment = { LIBSEAT_BACKEND = "seatd" }
+
+# NOTE: install.sh appends a `pre_exec` line here when raven-udev is present on
+# the machine -- the same coldplug settle the newer init runs before this
+# daemon, because a compositor that starts before the real DRM driver has taken
+# over from simpledrm dies when the kernel revokes it. It is appended rather
+# than shipped because a pre_exec that cannot be run is a hard start failure
+# (init's service.rs: "pre_exec: cannot run"), so a hardcoded path would stop
+# ravend from ever starting on an image without that binary. raven-udev is
+# idempotent, which it has to be: pre_exec runs on every supervisor restart.

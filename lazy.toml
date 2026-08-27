@@ -25,15 +25,24 @@ run = ["./scripts/check-unsafe.sh"]
 alias = ["check-unsafe"]
 
 [commands.preview]
+# imlazy has no variables, so the default comes from the shell: override it
+# with `state=denied imlazy preview`. One of empty, typing, denied, caps.
 desc = "Render the login screen to /tmp/raven-login.png without booting"
 run = [
-    "cargo run -q -p raven-greeter -- --preview /tmp/raven-login.png 1920x1080 ${state}",
+    "cargo run -q -p raven-greeter -- --preview /tmp/raven-login.png 1920x1080 ${state:-empty}",
 ]
 
-[commands.preview.vars]
-state = "empty"
-
 [commands.install]
-desc = "Build release and install (needs root)"
+desc = "Build release, install, and wire into raven-init (needs root)"
 dep = ["build"]
 run = ["sudo ./scripts/install.sh"]
+
+# Spelled out because it must exist. Without it, imlazy fuzzy-matches
+# `uninstall` to `install` and cheerfully installs what you asked it to remove.
+[commands.uninstall]
+desc = "Unwire from raven-init and remove the binaries (needs root)"
+run = ["sudo ./scripts/uninstall.sh"]
+
+[commands.purge]
+desc = "Uninstall, and also remove login.toml and the raven-greeter account"
+run = ["sudo ./scripts/uninstall.sh --purge"]
