@@ -1,0 +1,16 @@
+[package]
+name = "raven-auth"
+description = "Who may log in, and whether this password lets them. Parses /etc/passwd and /etc/shadow directly; the decision itself is a pure function."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+raven-crypt.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

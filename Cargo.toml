@@ -1,0 +1,93 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/raven-crypt",
+    "crates/raven-privdrop",
+    "crates/raven-auth",
+    "crates/raven-greet-proto",
+    "crates/ravend",
+    "crates/raven-greeter",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/javanhut/RavenLogin"
+
+# Inherited by every crate via `[lints] workspace = true`. `forbid` cannot be
+# locally overridden by an #[allow] anywhere inside a crate, so the only way to
+# smuggle unsafe in is to drop the `[lints]` opt-in from a manifest -- which is
+# what `scripts/check-unsafe.sh` exists to catch.
+#
+# `raven-privdrop` is the single exception, and declares its own [lints] table.
+# It exists because dropping a child to an unprivileged account with its
+# supplementary groups intact has no safe API on stable Rust; see that crate's
+# documentation for why every alternative is worse. Nothing else -- not the
+# hashing, not the shadow parsing, not the greeter -- is permitted any.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+todo = "warn"
+dbg_macro = "warn"
+
+[workspace.dependencies]
+raven-crypt = { path = "crates/raven-crypt" }
+raven-privdrop = { path = "crates/raven-privdrop" }
+raven-auth = { path = "crates/raven-auth" }
+raven-greet-proto = { path = "crates/raven-greet-proto" }
+
+# The hash primitive, and nothing else from RustCrypto: sha512-crypt is
+# implemented here rather than pulled in, so the only thing trusted to a
+# dependency is SHA-512 itself.
+sha2 = { version = "0.10", default-features = false }
+# Constant-time comparison. A `==` on two hash strings leaks, through timing,
+# how many leading characters of a guess were right.
+subtle = { version = "2.6", default-features = false }
+# Wiping passwords out of memory when they go out of scope.
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+
+# Only `raven-privdrop` depends on this, for three syscalls std does not
+# expose safely. It is not a general-purpose dependency of this workspace.
+libc = "0.2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Syscalls without a libc crate and without unsafe on our side. This is what
+# the rest of Raven uses; `nix` would be a second way to say the same thing.
+rustix = { version = "1.1", default-features = false, features = ["std", "process", "thread", "fs", "net"] }
+
+# The greeter is a Wayland client, and only the greeter is.
+smithay-client-toolkit = "0.21"
+# Text shaping and rasterization, matching huginn's own choice so the login
+# screen and the desktop it hands over to render type identically.
+# `default-features = false` drops fontconfig; fontdb finds fonts by scanning.
+# Local time for the clock. Reads the system tzdb, so the login screen shows
+# the time on the wall rather than UTC.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
+
+[profile.dev.package."*"]
+# sha512-crypt is 5000 SHA-512 compressions per password by design, and an
+# unoptimized sha2 makes the test suite take minutes instead of seconds. Deps
+# are rebuilt rarely, so they are always optimized; our own crates stay at the
+# default so backtraces and debuggers still work.
+opt-level = 3
+
+[profile.release]
+# A greeter is on the critical path of every boot and is tiny; optimizing for
+# size keeps it out of the way of the page cache during the busiest part of
+# startup, and none of it is hot enough for opt-level 3 to matter.
+opt-level = "s"
+lto = true
+strip = true

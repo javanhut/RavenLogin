@@ -1,0 +1,23 @@
+# The raven-init service definition for ravend.
+#
+# Append this to /etc/raven/init.toml, and disable the getty on tty1 -- the
+# greeter's compositor needs that VT, and a getty holding it means the two
+# fight over the console. See README.md, "Wiring it to raven-init".
+#
+# critical = false: a login daemon that cannot start should leave the machine
+# reachable from a console, not take it down. That is also why the getty on
+# tty2 is left alone below -- it is the way back in when this is broken.
+
+[[services]]
+name = "ravend"
+description = "Raven login daemon: greeter, authentication and session start"
+exec = "/usr/bin/ravend"
+args = []
+# udev, because the compositor this starts needs the GPU and the input devices
+# coldplugged; seatd, because it needs a seat to take the DRM master from.
+after = ["udev", "seatd"]
+# ravend supervises its own children and returns to the login screen when a
+# session ends, so it stays in the foreground for the life of the machine.
+restart = true
+enabled = true
+critical = false

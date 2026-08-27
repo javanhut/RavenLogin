@@ -1,0 +1,67 @@
+# /etc/raven/login.toml -- ravend, the RavenLinux login daemon.
+#
+# Every value here is a default. The whole file is optional and so is every
+# field in it, so an installed machine needs none of this -- it is shipped as a
+# reference for the values that exist, not as a file you must maintain.
+#
+# A file that is present but does not parse is a hard error: ravend refuses to
+# start rather than silently falling back to defaults, because falling back
+# would quietly ignore a policy somebody wrote down and believed.
+
+[greeter]
+# The unprivileged account the login screen runs as. It needs:
+#   - a nologin shell, so it never appears on its own login screen
+#   - membership of video, render, input and seat, so its compositor can open
+#     the GPU and read the keyboard
+#   - no password
+# `scripts/install.sh` creates it.
+user = "raven-greeter"
+
+# The compositor to host the greeter in, and the greeter itself.
+compositor = "huginn"
+command = "raven-greeter"
+
+# How long to wait for the compositor to bind its Wayland socket. A compositor
+# that exits before binding is noticed immediately; this is the ceiling for one
+# that simply takes a while.
+wayland_timeout = 10
+
+[session]
+# What to start once somebody has authenticated. The same script raven-init
+# runs today for the autologin session.
+command = "/usr/bin/raven-wayland-session"
+
+# How long a process gets to exit after SIGTERM before it is killed.
+stop_timeout = 10
+
+[policy]
+# Whether an account with an empty password field may log in by pressing Enter.
+#
+# Off by default. An empty hash means "no password has been set", which on a
+# half-provisioned machine is an accident rather than an intent -- and a
+# graphical greeter that accepts it turns that accident into an unlocked
+# machine for anybody who walks past. A console login can still set one.
+allow_empty_password = false
+
+# Whether root may log in to a graphical session.
+#
+# Off by default. Nothing on this desktop needs to be root, sudo-rs is
+# installed for the things that do, and a root session is one misconfigured
+# application away from being unable to open its own home directory.
+allow_root = false
+
+[ratelimit]
+# Failures allowed before any delay at all. Mistyping a password should cost
+# nothing.
+free_attempts = 3
+
+# The delay after the first non-free failure, doubling from there up to the
+# ceiling. Per account, cleared by a success, and forgotten after
+# forget_after_s of quiet.
+#
+# There is deliberately no lockout. The machine this runs on is somebody's own
+# computer, and the person most likely to be locked out by a lockout policy is
+# its owner.
+base_delay_ms = 1000
+max_delay_ms = 30000
+forget_after_s = 900

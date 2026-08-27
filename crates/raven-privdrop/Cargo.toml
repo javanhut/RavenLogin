@@ -1,0 +1,26 @@
+[package]
+name = "raven-privdrop"
+description = "Dropping a child process to an unprivileged account before exec. The workspace's only crate permitted to use unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+
+# This crate does NOT inherit the workspace lints, and that is the point: it is
+# the quarantine. `scripts/check-unsafe.sh` asserts that it is the only manifest
+# in the tree without `workspace = true` here, so the way to smuggle unsafe into
+# another crate -- quietly dropping its [lints] table -- is caught by CI.
+#
+# `unsafe_code` is permitted, but every unsafe block still needs a `// SAFETY:`
+# comment or the build fails.
+[lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+todo = "warn"
+dbg_macro = "warn"

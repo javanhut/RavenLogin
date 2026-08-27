@@ -1,0 +1,39 @@
+# ImLazy configuration for RavenLogin.
+
+[commands]
+
+[commands.build]
+desc = "Build everything, release"
+run = ["cargo build --release"]
+
+[commands.test]
+desc = "Run the whole test suite"
+run = ["cargo test --workspace"]
+
+[commands.check]
+desc = "Everything CI runs: format, lints, unsafe quarantine, tests"
+run = [
+    "cargo fmt --all --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "./scripts/check-unsafe.sh",
+    "cargo test --workspace",
+]
+
+[commands.unsafe]
+desc = "Assert unsafe is confined to raven-privdrop"
+run = ["./scripts/check-unsafe.sh"]
+alias = ["check-unsafe"]
+
+[commands.preview]
+desc = "Render the login screen to /tmp/raven-login.png without booting"
+run = [
+    "cargo run -q -p raven-greeter -- --preview /tmp/raven-login.png 1920x1080 ${state}",
+]
+
+[commands.preview.vars]
+state = "empty"
+
+[commands.install]
+desc = "Build release and install (needs root)"
+dep = ["build"]
+run = ["sudo ./scripts/install.sh"]
