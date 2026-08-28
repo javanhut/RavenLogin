@@ -22,6 +22,29 @@ wrong one for a machine you use. RavenLogin is the password prompt.
 |---|---|
 | `ravend` | the login daemon: reads `/etc/shadow`, starts sessions. Runs as root. |
 | `raven-greeter` | the login screen: a Wayland client. Runs as `raven-greeter`. |
+| `raven-lock` | the lock screen: the same screen, for a session that already exists. Runs as the person logged in. |
+| `raven-ui` | what both screens are drawn with. A library; no Wayland, no sockets. |
+
+## The lock screen
+
+`raven-lock` is here rather than in RavenGUI because it is the login screen
+again. Same layout, same colours, same field, same code — `raven-ui` is the
+crate both of them draw with, and the only differences are two words of copy
+and the absence of an account to switch to.
+
+That is not tidiness. A lock screen is the other moment a machine asks its
+owner for their password, and if it is a near-miss of the login screen — the
+avatar a few pixels off, the hint reworded, a slightly different blue — then
+what it teaches is that near-misses are normal. Making them the same code is
+the only way to guarantee they cannot drift.
+
+What differs is underneath. The greeter draws an `wlr-layer-shell` overlay;
+`raven-lock` is an `ext-session-lock-v1` client, because there *is* a session
+behind it and the protocol's guarantee — if the locking client dies, the
+compositor keeps the screen locked rather than revealing the desktop — is the
+whole point. And it authenticates on a different socket, which cannot start a
+session and answers only about the account that owns the connection. See
+[the verify socket](#the-verify-socket) below.
 
 ## The split
 
@@ -348,9 +371,12 @@ directly and does not care what the compositor binds.
 
 ## What this does not do yet
 
-- **`muninn-lock` is still a stub.** Locking a running session is RavenGUI's
-  job and is unrelated to logging in to a new one, but they will want to share
-  a look. When it is built, `theme.rs` here is the thing to reconcile with.
+- **A client cannot hold the idle lock off.** `raven-lock` locks on
+  `Super`+`L`, on resume from suspend, after ten minutes with no input, and
+  when somebody runs it. What is missing is `idle-inhibit-unstable-v1` in
+  huginn: a full-screen film is indistinguishable from an empty room, so a
+  long one locks the screen mid-play unless somebody turns the idle row off in
+  quick settings.
 - **No signal handling.** `rustix` exposes no safe `signalfd`, which is the same
   limitation `cawd` documents. `raven-init` stops services with SIGTERM then
   SIGKILL and the children are in `ravend`'s process group, so a shutdown does

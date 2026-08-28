@@ -45,14 +45,10 @@ the two symptoms — "the GPU is broken" and "something else is still holding it
 ## Why the greeter is a layer-shell client
 
 `ext-session-lock-v1` is the protocol designed for a surface that must not be
-dismissed, and it is what `muninn-lock` will use when it is built. It is not
-used here, for two reasons.
+dismissed, and it is what `raven-lock` uses. It is not used *here*, and the
+difference between the two screens is the reason.
 
-huginn does not implement it. It does implement `wlr-layer-shell`, so an
-`overlay` layer with `KeyboardInteractivity::Exclusive` needs no change to the
-compositor.
-
-And a greeter does not need what session-lock provides. The guarantee that
+A greeter does not need what session-lock provides. The guarantee that
 protocol gives is that if the locking client dies, the compositor keeps the
 screen locked rather than revealing the session behind it. At login time there
 is nothing behind the surface: no session exists. If the greeter dies, `ravend`
@@ -62,6 +58,34 @@ brings the whole login screen back up.
 So this surface is not a security boundary the way a lock screen is. It does
 not have to be. `ravend` is what enforces who may log in, and it would enforce
 it identically if the greeter were replaced with a hostile one.
+
+## The verify socket
+
+`raven-lock` needs what the greeter needs — somebody who can read `/etc/shadow`
+and say yes or no — and it must not get it from the socket that already exists.
+
+The greet socket can *start a session*. A lock screen able to reach it could be
+talked into starting a session for an account that is not the one it is
+holding, which is a way around the lock rather than through it. And that socket
+lives in a `0700` directory owned by the greeter, which is right for it and
+wrong here: the process asking is the logged-in user's.
+
+So `ravend` binds a second listener, `/run/raven-lock/verify.sock`, on its own
+thread — the lock screen's whole life happens inside the `run_session` call the
+main loop is blocked in, so it could not be served from there.
+
+**Anyone may connect to it, and that is safe for exactly one reason.** It only
+ever answers about the account that owns the connection. The account comes from
+`SO_PEERCRED`, which the kernel fills in and the caller cannot forge, and the
+`Verify` request carries no username at all — there is no field to put somebody
+else's name in. Take that away and this is a password oracle: any local process
+could guess at any account, from a socket present on every machine. With it, a
+caller can only guess at a password it is already sitting behind.
+
+`Authenticate` is refused on this socket, explicitly and with a test, and
+`Verify` and `Whoami` are refused on the greeter's. The two doors do not
+overlap. They keep separate rate limiters, so a person who has mistyped at the
+lock screen does not find themselves throttled out of a TTY login.
 
 ## Why the daemon polls
 
