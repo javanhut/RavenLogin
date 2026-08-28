@@ -43,6 +43,22 @@ use zeroize::Zeroize;
 /// as protected as the path to it.
 pub const SOCKET_PATH: &str = "/run/raven-login/greet.sock";
 
+/// Where the lock screen asks its one question.
+///
+/// A second socket, in a second directory, and the separation is the point.
+/// [`SOCKET_PATH`] lives in a `0700` directory owned by the greeter because
+/// only the greeter may ever reach it -- what crosses it can *start a session*.
+/// This one has to be reachable by whoever is logged in, so its directory is
+/// world-traversable and the socket itself accepts any connection.
+///
+/// That is safe only because of what is *not* on this socket. It cannot start
+/// a session, it cannot name an account, and it answers about exactly one
+/// account: the one that owns the connection, resolved from `SO_PEERCRED` and
+/// never from anything the caller said. A socket anyone may connect to is a
+/// password oracle unless it can only be asked about the asker, so that is the
+/// only question it takes.
+pub const VERIFY_SOCKET_PATH: &str = "/run/raven-lock/verify.sock";
+
 /// The largest message this protocol will read.
 ///
 /// Small on purpose. The biggest legitimate message is a user list, which for
@@ -128,7 +144,24 @@ pub enum Request {
     /// [`Response::Wallpaper`].
     Wallpaper,
     /// Check this password and, if it is right, start this account's session.
+    ///
+    /// Only ever valid on [`SOCKET_PATH`]. The verify socket rejects it, and
+    /// that rejection is the reason the lock screen cannot be tricked into
+    /// starting a second session for somebody.
     Authenticate { username: String, secret: Secret },
+    /// Whose connection is this? Answered with [`Response::You`], resolved from
+    /// the peer's credentials.
+    ///
+    /// The lock screen uses it to draw the right name and avatar without
+    /// parsing `/etc/passwd` itself. Only valid on [`VERIFY_SOCKET_PATH`].
+    Whoami,
+    /// Is this the password of the account that owns this connection?
+    ///
+    /// Deliberately carries no username. The account is the peer's, always, so
+    /// there is no field an attacker could put somebody else's name in. Only
+    /// valid on [`VERIFY_SOCKET_PATH`]; answered with [`Response::Verified`] or
+    /// [`Response::Denied`], and never with anything that starts a session.
+    Verify { secret: Secret },
 }
 
 /// Daemon to greeter.
@@ -175,6 +208,16 @@ pub enum Response {
         /// rather than letting someone type into a box that will refuse them.
         retry_after_ms: u64,
     },
+    /// Whose connection this is. The answer to [`Request::Whoami`].
+    You {
+        user: User,
+    },
+    /// The password was right. The lock screen may let go.
+    ///
+    /// Distinct from [`Response::Granted`], which means "a session is starting
+    /// and you should exit". Nothing starts here; the session was already
+    /// running, and this only says the person at the keyboard is its owner.
+    Verified,
     /// Something is wrong with the machine, not with the password — an
     /// unreadable `/etc/shadow`, a session that would not start.
     Failed {

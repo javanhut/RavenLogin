@@ -2,7 +2,7 @@
 //!
 //! Decoded once, scaled once per surface size, and after that a wallpapered
 //! frame costs exactly one `copy_from_slice` more than an unwallpapered one.
-//! That matters because [`crate::ui::LoginScreen::draw`] runs on every frame
+//! That matters because [`crate::screen::LoginScreen::draw`] runs on every frame
 //! callback -- the caret blinks and the clock ticks, so this surface redraws
 //! at the panel's refresh rate forever -- and rescaling two million pixels
 //! sixty times a second to draw the same picture would be the only expensive
@@ -83,7 +83,7 @@ const SET_STEM: &str = "wallpaper";
 /// a configured path is treated and is the point: a path an administrator
 /// wrote down and got wrong is worth complaining about, and a directory nobody
 /// has put anything in is the ordinary state of a machine that never set one.
-pub(crate) fn installed() -> Option<PathBuf> {
+pub fn installed() -> Option<PathBuf> {
     let entries = std::fs::read_dir(SET_DIR).ok()?;
     let found = choose(
         entries
@@ -113,7 +113,7 @@ fn choose(entries: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
 }
 
 /// A decoded wallpaper, and the scaled copy last asked for.
-pub(crate) struct Wallpaper {
+pub struct Wallpaper {
     image: Image,
     prepared: Option<Prepared>,
 }
@@ -156,7 +156,7 @@ impl Wallpaper {
     /// that it is worth not caring about -- and partly because dispatching a
     /// parser on a filename is how a parser ends up being handed a file the
     /// caller did not think it was handing it.
-    pub(crate) fn load(path: &Path) -> Result<Self> {
+    pub fn load(path: &Path) -> Result<Self> {
         let size = std::fs::metadata(path)
             .with_context(|| format!("cannot stat {}", path.display()))?
             .len();
@@ -189,7 +189,7 @@ impl Wallpaper {
     /// For tests elsewhere in the crate that need something to draw on
     /// without a file on disk to decode.
     #[cfg(test)]
-    pub(crate) fn flat(width: u32, height: u32, blue: u8, green: u8, red: u8) -> Self {
+    pub fn flat(width: u32, height: u32, blue: u8, green: u8, red: u8) -> Self {
         let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
         for _ in 0..(width as usize) * (height as usize) {
             pixels.extend_from_slice(&[blue, green, red, 0xFF]);
@@ -208,7 +208,7 @@ impl Wallpaper {
     ///
     /// Cached: the scale is redone only when the surface size changes, which
     /// happens at the first configure and then essentially never.
-    pub(crate) fn prepared(&mut self, width: i32, height: i32) -> &[u8] {
+    pub fn prepared(&mut self, width: i32, height: i32) -> &[u8] {
         let stale = self
             .prepared
             .as_ref()

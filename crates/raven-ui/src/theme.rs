@@ -25,43 +25,43 @@
 /// Packed into one integer so it is `Copy` and comparable, and converted at
 /// the edges: `wl_shm`'s `Argb8888` wants this exact layout, little-endian.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Color(u32);
+pub struct Color(u32);
 
 impl Color {
     #[must_use]
-    pub(crate) const fn from_argb(argb: u32) -> Self {
+    pub const fn from_argb(argb: u32) -> Self {
         Self(argb)
     }
 
     #[must_use]
-    pub(crate) const fn alpha(self) -> u8 {
+    pub const fn alpha(self) -> u8 {
         (self.0 >> 24) as u8
     }
 
     #[must_use]
-    pub(crate) const fn red(self) -> u8 {
+    pub const fn red(self) -> u8 {
         (self.0 >> 16) as u8
     }
 
     #[must_use]
-    pub(crate) const fn green(self) -> u8 {
+    pub const fn green(self) -> u8 {
         (self.0 >> 8) as u8
     }
 
     #[must_use]
-    pub(crate) const fn blue(self) -> u8 {
+    pub const fn blue(self) -> u8 {
         self.0 as u8
     }
 
     /// The same colour at a different opacity.
     #[must_use]
-    pub(crate) const fn with_alpha(self, alpha: u8) -> Self {
+    pub const fn with_alpha(self, alpha: u8) -> Self {
         Self((self.0 & 0x00FF_FFFF) | ((alpha as u32) << 24))
     }
 
     /// This colour scaled toward transparent by `factor` in `0.0..=1.0`.
     #[must_use]
-    pub(crate) fn faded(self, factor: f32) -> Self {
+    pub fn faded(self, factor: f32) -> Self {
         let alpha = (f32::from(self.alpha()) * factor.clamp(0.0, 1.0)) as u8;
         self.with_alpha(alpha)
     }
@@ -72,13 +72,13 @@ impl Color {
 // ---------------------------------------------------------------------------
 
 /// The whole screen behind everything. huginn's `BACKGROUND`.
-pub(crate) const BACKDROP: Color = Color::from_argb(0xFF16_161F);
+pub const BACKDROP: Color = Color::from_argb(0xFF16_161F);
 
 /// The darker vignette the backdrop falls off to at the edges.
 ///
 /// The gradient is very shallow on purpose. It exists to stop a large flat
 /// panel showing its own banding, not to be seen as a gradient.
-pub(crate) const BACKDROP_EDGE: Color = Color::from_argb(0xFF0D_0D14);
+pub const BACKDROP_EDGE: Color = Color::from_argb(0xFF0D_0D14);
 
 /// Laid over a wallpaper, and only over a wallpaper.
 ///
@@ -93,7 +93,7 @@ pub(crate) const BACKDROP_EDGE: Color = Color::from_argb(0xFF0D_0D14);
 ///
 /// [`TEXT_DIM`] does *not* survive this, which is what
 /// [`TEXT_DIM_ON_WALLPAPER`] exists for; see there.
-pub(crate) const SCRIM: Color = BACKDROP.with_alpha(0xC8);
+pub const SCRIM: Color = BACKDROP.with_alpha(0xC8);
 
 /// [`TEXT_DIM`], for the date and the footer, when they are sitting on a
 /// scrimmed wallpaper instead of on the backdrop.
@@ -109,31 +109,31 @@ pub(crate) const SCRIM: Color = BACKDROP.with_alpha(0xC8);
 /// Two constants rather than one, because the backdrop case is not broken and
 /// making the date brighter on a machine with no wallpaper would be changing
 /// a screen nobody asked to change.
-pub(crate) const TEXT_DIM_ON_WALLPAPER: Color = Color::from_argb(0xFF8A_93BE);
+pub const TEXT_DIM_ON_WALLPAPER: Color = Color::from_argb(0xFF8A_93BE);
 
 /// The card the prompt sits on.
-pub(crate) const SURFACE: Color = Color::from_argb(0xFF1A_1B26);
+pub const SURFACE: Color = Color::from_argb(0xFF1A_1B26);
 
 /// Hairline borders.
-pub(crate) const BORDER: Color = Color::from_argb(0xFF2A_2E45);
+pub const BORDER: Color = Color::from_argb(0xFF2A_2E45);
 
 /// Focus rings and the caret. huginn's `ACCENT`.
-pub(crate) const ACCENT: Color = Color::from_argb(0xFF7A_A2F7);
+pub const ACCENT: Color = Color::from_argb(0xFF7A_A2F7);
 
 /// Ordinary text.
-pub(crate) const TEXT: Color = Color::from_argb(0xFFC0_CAF5);
+pub const TEXT: Color = Color::from_argb(0xFFC0_CAF5);
 
 /// Secondary text: the date, the footer, the hint line.
-pub(crate) const TEXT_DIM: Color = Color::from_argb(0xFF56_5F89);
+pub const TEXT_DIM: Color = Color::from_argb(0xFF56_5F89);
 
 /// A failed attempt.
-pub(crate) const ERROR: Color = Color::from_argb(0xFFF7_768E);
+pub const ERROR: Color = Color::from_argb(0xFFF7_768E);
 
 /// Caps Lock, and anything else that is a caution rather than a failure.
-pub(crate) const WARNING: Color = Color::from_argb(0xFFE0_AF68);
+pub const WARNING: Color = Color::from_argb(0xFFE0_AF68);
 
 /// A granted login, for the moment before the screen goes away.
-pub(crate) const SUCCESS: Color = Color::from_argb(0xFF9E_CE6A);
+pub const SUCCESS: Color = Color::from_argb(0xFF9E_CE6A);
 
 // ---------------------------------------------------------------------------
 // Metric
@@ -142,29 +142,29 @@ pub(crate) const SUCCESS: Color = Color::from_argb(0xFF9E_CE6A);
 /// Everything is laid out against this, and it is scaled by the output's
 /// scale factor before use, so the login screen is the same physical size on
 /// a HiDPI panel as on a 96dpi one.
-pub(crate) const CARD_WIDTH: f32 = 380.0;
+pub const CARD_WIDTH: f32 = 380.0;
 
-pub(crate) const AVATAR_RADIUS: f32 = 44.0;
-pub(crate) const AVATAR_RING: f32 = 2.0;
+pub const AVATAR_RADIUS: f32 = 44.0;
+pub const AVATAR_RING: f32 = 2.0;
 
-pub(crate) const FIELD_HEIGHT: f32 = 44.0;
-pub(crate) const FIELD_RADIUS: f32 = 10.0;
-pub(crate) const FIELD_BORDER: f32 = 1.5;
+pub const FIELD_HEIGHT: f32 = 44.0;
+pub const FIELD_RADIUS: f32 = 10.0;
+pub const FIELD_BORDER: f32 = 1.5;
 
 /// The dots that stand in for the password.
-pub(crate) const DOT_RADIUS: f32 = 4.0;
-pub(crate) const DOT_SPACING: f32 = 14.0;
+pub const DOT_RADIUS: f32 = 4.0;
+pub const DOT_SPACING: f32 = 14.0;
 /// Beyond this many, the row stops growing and just stays full — a password
 /// whose length is legible from across the room is a password leaked to
 /// anybody watching.
-pub(crate) const DOT_MAX: usize = 12;
+pub const DOT_MAX: usize = 12;
 
-pub(crate) const CLOCK_SIZE: f32 = 72.0;
-pub(crate) const DATE_SIZE: f32 = 16.0;
-pub(crate) const NAME_SIZE: f32 = 20.0;
-pub(crate) const BODY_SIZE: f32 = 14.0;
-pub(crate) const SMALL_SIZE: f32 = 12.5;
-pub(crate) const AVATAR_SIZE: f32 = 36.0;
+pub const CLOCK_SIZE: f32 = 72.0;
+pub const DATE_SIZE: f32 = 16.0;
+pub const NAME_SIZE: f32 = 20.0;
+pub const BODY_SIZE: f32 = 14.0;
+pub const SMALL_SIZE: f32 = 12.5;
+pub const AVATAR_SIZE: f32 = 36.0;
 
 #[cfg(test)]
 mod tests {

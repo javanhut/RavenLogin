@@ -1,24 +1,23 @@
 [package]
-name = "raven-greeter"
-description = "The RavenLinux login screen. An unprivileged Wayland layer-shell client; it can draw and it can ask ravend a question, and that is all it can do."
+name = "raven-ui"
+description = "What the RavenLinux login screen and lock screen are both drawn with. No Wayland, no sockets: it takes a buffer and fills it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# For `User`, which is what a screen draws an avatar and a name from. The only
+# thing taken from the protocol crate: nothing here speaks to a socket.
 raven-greet-proto.workspace = true
-raven-ui.workspace = true
 
 anyhow.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
 jiff.workspace = true
 png.workspace = true
+tracing.workspace = true
 zune-jpeg.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-smithay-client-toolkit.workspace = true
 cosmic-text.workspace = true
 
 [lints]

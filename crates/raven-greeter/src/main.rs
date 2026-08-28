@@ -25,13 +25,8 @@
 
 #![forbid(unsafe_code)]
 
-mod canvas;
 mod client;
 mod preview;
-mod text;
-mod theme;
-mod ui;
-mod wallpaper;
 
 use std::time::{Duration, Instant};
 
@@ -61,11 +56,12 @@ use smithay_client_toolkit::reexports::client::protocol::{
 };
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 
-use crate::canvas::Canvas;
+use raven_ui::canvas::Canvas;
+use raven_ui::screen::{Action, Message, MessageKind, PasswordScreen};
+use raven_ui::text::TextRenderer;
+use raven_ui::wallpaper::{self, Wallpaper};
+
 use crate::client::{Attempt, Client};
-use crate::text::TextRenderer;
-use crate::ui::{Action, LoginScreen, Message, MessageKind};
-use crate::wallpaper::Wallpaper;
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -176,7 +172,7 @@ fn run() -> Result<()> {
         exit: false,
         ctrl: false,
         screen: {
-            let mut screen = LoginScreen::new(users);
+            let mut screen = PasswordScreen::new(users);
             screen.set_wallpaper(wallpaper);
             screen
         },
@@ -213,7 +209,7 @@ struct Greeter {
     /// take the Ctrl-U branch and silently clear the field.
     ctrl: bool,
 
-    screen: LoginScreen,
+    screen: PasswordScreen,
     text: TextRenderer,
     daemon: Client,
 }

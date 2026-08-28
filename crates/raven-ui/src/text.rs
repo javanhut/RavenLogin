@@ -52,7 +52,7 @@ const FAMILIES: &[&str] = &[
 
 /// How text is placed against the `x` it is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Align {
+pub enum Align {
     /// `x` is the left edge.
     Left,
     /// `x` is the centre.
@@ -63,7 +63,7 @@ pub(crate) enum Align {
 
 /// A shaped, rasterized run of text.
 #[derive(Debug)]
-pub(crate) struct TextRenderer {
+pub struct TextRenderer {
     font_system: FontSystem,
     cache: SwashCache,
     /// The family that was actually found, resolved once at startup.
@@ -74,7 +74,7 @@ impl TextRenderer {
     /// Build the font database. This is the expensive part — it scans the
     /// system font directories — and it happens once, before the first frame.
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let font_system = FontSystem::new();
 
         // Resolve the family once rather than per draw call. A name that
@@ -152,7 +152,7 @@ impl TextRenderer {
 
     /// How wide `text` would be. Used to centre things and to size the field
     /// around its contents.
-    pub(crate) fn measure(&mut self, text: &str, size: f32, weight: Weight) -> f32 {
+    pub fn measure(&mut self, text: &str, size: f32, weight: Weight) -> f32 {
         self.shape(text, size, weight).1
     }
 
@@ -162,7 +162,7 @@ impl TextRenderer {
     /// is placing a label inside a layout it already computed, and tops are
     /// what that arithmetic is in.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw(
+    pub fn draw(
         &mut self,
         canvas: &mut Canvas<'_>,
         text: &str,
@@ -219,7 +219,7 @@ impl Default for TextRenderer {
 }
 
 /// Re-exported so the UI can ask for a weight without naming cosmic-text.
-pub(crate) use cosmic_text::Weight as FontWeight;
+pub use cosmic_text::Weight as FontWeight;
 
 #[cfg(test)]
 mod tests {

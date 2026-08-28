@@ -28,7 +28,7 @@
 //! The login screen is the one part of this system that cannot be judged by
 //! reading it, and the ordinary way to look at it is to reboot a machine into
 //! it. That is a slow enough loop that the design stops being iterated on, so
-//! this renders exactly what the greeter would draw — the same [`LoginScreen`],
+//! this renders exactly what the greeter would draw — the same [`PasswordScreen`],
 //! the same canvas, the same font — into a PNG, on any host, in a few hundred
 //! milliseconds.
 //!
@@ -47,10 +47,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::canvas::Canvas;
-use crate::text::TextRenderer;
-use crate::ui::{LoginScreen, Message, MessageKind};
-use crate::wallpaper::Wallpaper;
+use raven_ui::canvas::Canvas;
+use raven_ui::screen::{Message, MessageKind, PasswordScreen};
+use raven_ui::text::TextRenderer;
+use raven_ui::wallpaper::Wallpaper;
 use raven_greet_proto::User;
 
 /// Parse `--preview`'s arguments and render.
@@ -121,7 +121,7 @@ pub(crate) fn render(
 
     // Stand-in accounts, so a preview on a build host looks like a preview on
     // a real machine rather than an empty screen.
-    let mut screen = LoginScreen::new(vec![
+    let mut screen = PasswordScreen::new(vec![
         User {
             name: "javan".to_string(),
             display_name: "Javan Hutchinson".to_string(),

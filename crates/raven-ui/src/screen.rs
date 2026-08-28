@@ -1,11 +1,18 @@
-//! The login screen: what it holds, what a keystroke does to it, and how it is
-//! drawn.
+//! A screen that asks for a password: what it holds, what a keystroke does to
+//! it, and how it is drawn.
 //!
-//! Separated from `main.rs` so that all of it except the drawing is testable
-//! without a Wayland connection. The state machine is small, but it is the part
-//! that has to be right — a greeter that loses a keystroke, or that lets Enter
-//! through while an attempt is already in flight, is a greeter that somebody
-//! cannot log in with and cannot debug.
+//! Two things use this. `raven-greeter` asks for a password to *start* a
+//! session; `raven-lock` asks for one to get back into a session that is
+//! already running. They are the same screen with two words changed, and they
+//! share this type rather than a look — a lock screen that drifts a shade away
+//! from the login screen it is imitating is a lock screen that looks like a
+//! phishing attempt on the machine's own owner.
+//!
+//! Separated from either binary's `main.rs` so that all of it except the
+//! drawing is testable without a Wayland connection. The state machine is
+//! small, but it is the part that has to be right — a screen that loses a
+//! keystroke, or that lets Enter through while an attempt is already in
+//! flight, is one somebody cannot get past and cannot debug.
 
 use std::time::{Duration, Instant};
 
@@ -16,18 +23,33 @@ use crate::text::{Align, FontWeight, TextRenderer};
 use crate::theme;
 use crate::wallpaper::Wallpaper;
 
+/// Which of the two screens this is.
+///
+/// It changes two things and deliberately nothing else: the words under the
+/// field, and whether Tab offers the other accounts. A lock screen must not
+/// offer them — the session behind it belongs to one person, and letting the
+/// screen switch to another account would either be a lie or a way in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// `raven-greeter`: no session exists yet.
+    #[default]
+    Login,
+    /// `raven-lock`: a session exists and is being held.
+    Lock,
+}
+
 /// How long the caret is on, then off.
 const CARET_PERIOD: Duration = Duration::from_millis(1100);
 
 /// What the line under the field is saying, and in what colour.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Message {
+pub struct Message {
     pub text: String,
     pub kind: MessageKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MessageKind {
+pub enum MessageKind {
     Error,
     Warning,
     Success,
@@ -45,7 +67,7 @@ impl MessageKind {
 
 /// What a keystroke asked the screen to do that it cannot do itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Action {
+pub enum Action {
     /// Nothing the caller needs to know about; just redraw.
     None,
     /// Check this password. The screen has already put itself in its busy
@@ -55,7 +77,7 @@ pub(crate) enum Action {
 
 /// The login screen.
 #[derive(Debug)]
-pub(crate) struct LoginScreen {
+pub struct PasswordScreen {
     users: Vec<User>,
     selected: usize,
     password: String,
@@ -78,12 +100,29 @@ pub(crate) struct LoginScreen {
     /// what was really drawn rather than what was configured, or a fallback
     /// frame gets the brighter dim over the plain backdrop.
     on_wallpaper: bool,
+    mode: Mode,
 }
 
-impl LoginScreen {
+impl PasswordScreen {
+    /// A login screen, offering every account it was given.
     #[must_use]
-    pub(crate) fn new(users: Vec<User>) -> Self {
+    pub fn new(users: Vec<User>) -> Self {
+        Self::with_mode(users, Mode::Login)
+    }
+
+    /// A lock screen for one account: the person whose session this is.
+    ///
+    /// Takes a single user rather than a list, because that is the whole
+    /// difference. There is nothing to choose between.
+    #[must_use]
+    pub fn locked(user: User) -> Self {
+        Self::with_mode(vec![user], Mode::Lock)
+    }
+
+    #[must_use]
+    fn with_mode(users: Vec<User>, mode: Mode) -> Self {
         Self {
+            mode,
             users,
             selected: 0,
             password: String::new(),
@@ -101,7 +140,7 @@ impl LoginScreen {
 
     /// Draw on `wallpaper` instead of the backdrop, or on the backdrop again
     /// with `None`.
-    pub(crate) fn set_wallpaper(&mut self, wallpaper: Option<Wallpaper>) {
+    pub fn set_wallpaper(&mut self, wallpaper: Option<Wallpaper>) {
         self.wallpaper = wallpaper;
     }
 
@@ -120,21 +159,21 @@ impl LoginScreen {
 
     /// The account currently selected, if there is one.
     #[must_use]
-    pub(crate) fn current(&self) -> Option<&User> {
+    pub fn current(&self) -> Option<&User> {
         self.users.get(self.selected)
     }
 
     #[must_use]
-    pub(crate) fn is_busy(&self) -> bool {
+    pub fn is_busy(&self) -> bool {
         self.busy
     }
 
     /// Let the screen accept input again, after a denied attempt.
-    pub(crate) fn set_idle(&mut self) {
+    pub fn set_idle(&mut self) {
         self.busy = false;
     }
 
-    pub(crate) fn set_message(&mut self, message: Option<Message>) {
+    pub fn set_message(&mut self, message: Option<Message>) {
         self.message = message;
     }
 
@@ -142,7 +181,7 @@ impl LoginScreen {
     ///
     /// Overwritten before being dropped rather than just `clear()`ed: `clear`
     /// sets the length to zero and leaves the bytes in the allocation.
-    pub(crate) fn clear_password(&mut self) {
+    pub fn clear_password(&mut self) {
         // SAFETY-adjacent note, not an unsafe block: this writes over the
         // existing bytes through the same `String`, which is why it is done
         // by replacing the contents rather than by touching the buffer.
@@ -152,12 +191,12 @@ impl LoginScreen {
         self.password.clear();
     }
 
-    pub(crate) fn set_caps_lock(&mut self, on: bool) {
+    pub fn set_caps_lock(&mut self, on: bool) {
         self.caps_lock = on;
     }
 
     /// Refuse further attempts until `when`.
-    pub(crate) fn throttle_until(&mut self, retry_after: Duration) {
+    pub fn throttle_until(&mut self, retry_after: Duration) {
         if retry_after.is_zero() {
             self.retry_after = None;
         } else {
@@ -167,14 +206,14 @@ impl LoginScreen {
 
     /// Whether the screen is currently refusing attempts, and for how long.
     #[must_use]
-    pub(crate) fn throttled_for(&self, now: Instant) -> Option<Duration> {
+    pub fn throttled_for(&self, now: Instant) -> Option<Duration> {
         let until = self.retry_after?;
         (until > now).then(|| until - now)
     }
 
     /// Move to the next account. A no-op with fewer than two.
-    pub(crate) fn next_user(&mut self) {
-        if self.users.len() < 2 {
+    pub fn next_user(&mut self) {
+        if self.mode == Mode::Lock || self.users.len() < 2 {
             return;
         }
         self.selected = (self.selected + 1) % self.users.len();
@@ -182,8 +221,8 @@ impl LoginScreen {
         self.message = None;
     }
 
-    pub(crate) fn previous_user(&mut self) {
-        if self.users.len() < 2 {
+    pub fn previous_user(&mut self) {
+        if self.mode == Mode::Lock || self.users.len() < 2 {
             return;
         }
         self.selected = (self.selected + self.users.len() - 1) % self.users.len();
@@ -192,7 +231,7 @@ impl LoginScreen {
     }
 
     /// A character was typed.
-    pub(crate) fn push_char(&mut self, c: char) {
+    pub fn push_char(&mut self, c: char) {
         if self.busy {
             return;
         }
@@ -207,7 +246,7 @@ impl LoginScreen {
         self.message = None;
     }
 
-    pub(crate) fn backspace(&mut self) {
+    pub fn backspace(&mut self) {
         if self.busy {
             return;
         }
@@ -216,7 +255,7 @@ impl LoginScreen {
     }
 
     /// Enter. Returns what the caller should do about it.
-    pub(crate) fn submit(&mut self, now: Instant) -> Action {
+    pub fn submit(&mut self, now: Instant) -> Action {
         if self.busy {
             return Action::None;
         }
@@ -229,7 +268,15 @@ impl LoginScreen {
         }
         let Some(user) = self.users.get(self.selected) else {
             self.message = Some(Message {
-                text: "There are no accounts on this machine to log in to.".to_string(),
+                text: match self.mode {
+                    Mode::Login => {
+                        "There are no accounts on this machine to log in to.".to_string()
+                    }
+                    // Unreachable in practice -- a lock screen is built from
+                    // the account whose session it is holding -- but a lock
+                    // screen must never render the login screen's sentence.
+                    Mode::Lock => "This session has no account to unlock.".to_string(),
+                },
                 kind: MessageKind::Error,
             });
             return Action::None;
@@ -254,7 +301,7 @@ impl LoginScreen {
     /// `scale` is the output's scale factor: every metric in [`theme`] is in
     /// logical pixels and is multiplied by it here, so the login screen is the
     /// same physical size on a HiDPI panel as on a 96dpi one.
-    pub(crate) fn draw(
+    pub fn draw(
         &mut self,
         canvas: &mut Canvas<'_>,
         text: &mut TextRenderer,
@@ -503,6 +550,8 @@ impl LoginScreen {
             ("Checking…".to_string(), self.dim())
         } else if self.caps_lock {
             ("Caps Lock is on".to_string(), theme::WARNING)
+        } else if self.mode == Mode::Lock {
+            ("Enter to unlock".to_string(), self.dim())
         } else if self.users.len() > 1 {
             (
                 "Enter to log in · Tab to switch account".to_string(),
@@ -629,8 +678,8 @@ mod tests {
         }
     }
 
-    fn screen() -> LoginScreen {
-        LoginScreen::new(vec![user("javan", 'J'), user("second", 'S')])
+    fn screen() -> PasswordScreen {
+        PasswordScreen::new(vec![user("javan", 'J'), user("second", 'S')])
     }
 
     #[test]
@@ -728,7 +777,7 @@ mod tests {
 
     #[test]
     fn switching_does_nothing_with_one_account() {
-        let mut s = LoginScreen::new(vec![user("javan", 'J')]);
+        let mut s = PasswordScreen::new(vec![user("javan", 'J')]);
         s.push_char('a');
         s.next_user();
         assert_eq!(s.current().map(|u| u.name.as_str()), Some("javan"));
@@ -756,7 +805,7 @@ mod tests {
 
     #[test]
     fn a_machine_with_no_accounts_says_so() {
-        let mut s = LoginScreen::new(Vec::new());
+        let mut s = PasswordScreen::new(Vec::new());
         assert_eq!(s.submit(Instant::now()), Action::None);
         assert_eq!(s.message.as_ref().map(|m| m.kind), Some(MessageKind::Error));
         assert!(!s.is_busy());

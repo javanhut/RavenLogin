@@ -5,8 +5,10 @@ members = [
     "crates/raven-privdrop",
     "crates/raven-auth",
     "crates/raven-greet-proto",
+    "crates/raven-ui",
     "crates/ravend",
     "crates/raven-greeter",
+    "crates/raven-lock",
 ]
 
 [workspace.package]
@@ -41,6 +43,7 @@ raven-crypt = { path = "crates/raven-crypt" }
 raven-privdrop = { path = "crates/raven-privdrop" }
 raven-auth = { path = "crates/raven-auth" }
 raven-greet-proto = { path = "crates/raven-greet-proto" }
+raven-ui = { path = "crates/raven-ui" }
 
 # The hash primitive, and nothing else from RustCrypto: sha512-crypt is
 # implemented here rather than pulled in, so the only thing trusted to a

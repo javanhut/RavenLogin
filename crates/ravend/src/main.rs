@@ -39,6 +39,7 @@
 
 mod config;
 mod ratelimit;
+mod verify;
 mod session;
 
 use std::io::{BufReader, BufWriter};
@@ -106,6 +107,15 @@ fn run() -> Result<()> {
 
     let listener = bind_socket(&greeter_account)?;
     let mut limiter = RateLimiter::new(config.ratelimit.into());
+
+    // The lock screen's socket. Started before the first login rather than
+    // after it, because the thread has to already be there when a session
+    // locks -- the main loop below is blocked inside `run_session` for the
+    // whole time that could happen.
+    verify::spawn(
+        Authenticator::new(config.policy.into()),
+        config.ratelimit.into(),
+    );
 
     loop {
         let account = greet(
@@ -396,6 +406,20 @@ fn serve(
                 }
                 tracing::info!(wallpaper = ?path, "sending the wallpaper path");
                 raven_greet_proto::write_message(&mut writer, &Response::Wallpaper { path })?;
+            }
+
+            // Not served here, and the refusal is deliberate rather than an
+            // oversight: these are the lock screen's, and the lock screen must
+            // reach `verify.sock` -- the socket that cannot start a session --
+            // and never this one.
+            Request::Whoami | Request::Verify { .. } => {
+                tracing::warn!("refused a lock-screen request on the greet socket");
+                raven_greet_proto::write_message(
+                    &mut writer,
+                    &Response::Failed {
+                        message: "This socket does not answer the lock screen.".to_string(),
+                    },
+                )?;
             }
 
             Request::Authenticate { username, secret } => {

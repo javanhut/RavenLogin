@@ -22,7 +22,7 @@ use crate::theme::Color;
 
 /// A borrowed `wl_shm` buffer, with drawing operations on top.
 #[derive(Debug)]
-pub(crate) struct Canvas<'a> {
+pub struct Canvas<'a> {
     data: &'a mut [u8],
     width: i32,
     height: i32,
@@ -30,7 +30,7 @@ pub(crate) struct Canvas<'a> {
 
 impl<'a> Canvas<'a> {
     /// Wrap a buffer. `data` must be `width * height * 4` bytes.
-    pub(crate) fn new(data: &'a mut [u8], width: i32, height: i32) -> Self {
+    pub fn new(data: &'a mut [u8], width: i32, height: i32) -> Self {
         debug_assert_eq!(
             data.len(),
             (width * height * 4) as usize,
@@ -44,12 +44,12 @@ impl<'a> Canvas<'a> {
     }
 
     #[must_use]
-    pub(crate) fn width(&self) -> f32 {
+    pub fn width(&self) -> f32 {
         self.width as f32
     }
 
     #[must_use]
-    pub(crate) fn height(&self) -> f32 {
+    pub fn height(&self) -> f32 {
         self.height as f32
     }
 
@@ -59,7 +59,7 @@ impl<'a> Canvas<'a> {
     /// partly off the edge should be clipped, not smeared along it, and the
     /// callers below all rely on being able to iterate a bounding box that may
     /// hang off the screen.
-    pub(crate) fn blend(&mut self, x: i32, y: i32, color: Color, coverage: f32) {
+    pub fn blend(&mut self, x: i32, y: i32, color: Color, coverage: f32) {
         if x < 0 || y < 0 || x >= self.width || y >= self.height {
             return;
         }
@@ -102,7 +102,7 @@ impl<'a> Canvas<'a> {
     /// below the noise floor of any real panel. Ordered rather than random
     /// because it is deterministic: the same frame renders identically every
     /// time, so a preview PNG can be compared against the last one.
-    pub(crate) fn gradient(&mut self, top: Color, bottom: Color) {
+    pub fn gradient(&mut self, top: Color, bottom: Color) {
         /// A 4x4 Bayer matrix, scaled to 0.0..1.0 and centred on zero, so the
         /// perturbation is +/- half a step and the mean is unchanged.
         #[rustfmt::skip]
@@ -155,7 +155,7 @@ impl<'a> Canvas<'a> {
     /// half a wallpaper and half an uninitialized frame is worse than no
     /// wallpaper.
     #[must_use]
-    pub(crate) fn blit(&mut self, pixels: &[u8]) -> bool {
+    pub fn blit(&mut self, pixels: &[u8]) -> bool {
         if pixels.len() != self.data.len() {
             return false;
         }
@@ -167,13 +167,13 @@ impl<'a> Canvas<'a> {
     ///
     /// `radius` is clamped to half the shorter side, so a "rounded rectangle"
     /// with an absurd radius becomes a capsule rather than folding inside out.
-    pub(crate) fn rounded_rect(&mut self, rect: Rect, radius: f32, color: Color) {
+    pub fn rounded_rect(&mut self, rect: Rect, radius: f32, color: Color) {
         self.rounded_rect_impl(rect, radius, color, None);
     }
 
     /// The outline of a rounded rectangle, `thickness` wide, drawn inside the
     /// rectangle's bounds.
-    pub(crate) fn rounded_rect_outline(
+    pub fn rounded_rect_outline(
         &mut self,
         rect: Rect,
         radius: f32,
@@ -218,12 +218,12 @@ impl<'a> Canvas<'a> {
     }
 
     /// A filled circle.
-    pub(crate) fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+    pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
         self.circle_impl(cx, cy, radius, color, None);
     }
 
     /// A circular ring, `thickness` wide, centred on `radius`.
-    pub(crate) fn circle_outline(
+    pub fn circle_outline(
         &mut self,
         cx: f32,
         cy: f32,
@@ -253,7 +253,7 @@ impl<'a> Canvas<'a> {
 
 /// A rectangle in surface coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Rect {
+pub struct Rect {
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -262,7 +262,7 @@ pub(crate) struct Rect {
 
 impl Rect {
     #[must_use]
-    pub(crate) const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self {
             x,
             y,

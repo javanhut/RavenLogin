@@ -556,6 +556,7 @@ dependencies = [
  "jiff",
  "png",
  "raven-greet-proto",
+ "raven-ui",
  "smithay-client-toolkit",
  "tracing",
  "tracing-subscriber",
@@ -563,10 +564,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "raven-lock"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "raven-greet-proto",
+ "raven-ui",
+ "smithay-client-toolkit",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "raven-privdrop"
 version = "0.0.1"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "raven-ui"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "cosmic-text",
+ "jiff",
+ "png",
+ "raven-greet-proto",
+ "tracing",
+ "zune-jpeg",
 ]
 
 [[package]]
