@@ -16,7 +16,7 @@ kernel
             │  │                                                     │
             ├──┼─ prepare /run/user/<greeter uid>   0700, chowned     │
             ├──┼─ spawn huginn            as raven-greeter            │
-            ├──┼─ wait for wayland-N to appear      (or fail fast)    │
+            ├──┼─ wait for wayland-N to be bound    (or fail fast)    │
             ├──┼─ spawn raven-greeter     as raven-greeter            │
             │  │                                                      │
             │  │     greeter ── ListUsers ──────────▶ ravend           │
@@ -101,6 +101,34 @@ The honest alternative is a `calloop` event loop with a `pidfd` per child,
 which is what huginn does. It is more code, one more dependency, and saves ten
 wakeups a second on a process that exists for the thirty seconds somebody
 spends typing a password.
+
+## Why a failed login screen is retried, not fatal
+
+`ravend` exits for exactly one class of problem: a precondition it cannot
+retry into existence -- a config that does not parse, not being root, no
+greeter account, a socket it cannot bind. Everything after that is a child
+process, and a child that fails brings the login screen back up after a
+backoff (1s, doubling to 10s) with the reason in the log. It never takes the
+daemon down.
+
+The reason is how `raven-init` supervises. It restarts a service that exits,
+but gives up on one that exits five times in a minute. A greeter that dies in
+under a second -- and one pointed at a dead socket does -- hits that limit in
+five seconds, after which the machine has no login screen until it is
+rebooted. A restart loop inside the daemon has no such limit, and it should
+not: there is nobody at the console who can `raven-rc start ravend`, because
+the login screen is how they would get there.
+
+The failure that found this is worth recording. A compositor stopped with
+`SIGTERM` does not always unlink its socket, and `/run` only empties on reboot.
+So when a session ended, `wait_for_wayland_socket` found the previous
+compositor's stale `wayland-1` twenty microseconds after spawning the next one
+and declared it listening. The greeter connected to a socket nobody held,
+exited, the daemon exited, and init restarted it into the same stale file five
+times. Two fixes, either sufficient, both kept: `prepare_runtime_dir` removes
+every `wayland-*` socket and lock before a compositor is spawned -- nothing
+else may bind one there -- and the wait only counts an entry that is actually
+a socket.
 
 ## Ordering that is load-bearing
 

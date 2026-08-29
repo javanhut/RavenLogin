@@ -8,7 +8,7 @@
 //! inherited from root, and a stop that asks before it insists.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -68,7 +68,59 @@ pub(crate) fn prepare_runtime_dir(uid: u32, gid: u32) -> Result<PathBuf> {
     std::os::unix::fs::chown(&path, Some(uid), Some(gid))
         .with_context(|| format!("cannot chown {} to {uid}:{gid}", path.display()))?;
 
+    clear_stale_wayland_sockets(&path)?;
+
     Ok(path)
+}
+
+/// Remove whatever `wayland-*` sockets and lock files a previous compositor
+/// left in a runtime directory.
+///
+/// This is what stops the login screen from dying after a session ends. A
+/// compositor stopped with `SIGTERM` does not always get to unlink its socket,
+/// and `/run` is a tmpfs that only empties on reboot. Left in place, the stale
+/// `wayland-1` is found by [`wait_for_wayland_socket`] the instant the next
+/// compositor is spawned -- long before it has bound anything -- and the
+/// greeter is pointed at a socket nothing is listening on. It exits, the
+/// daemon exits, `raven-init` restarts it into the same stale file, and after
+/// five rounds init gives up on the service. That is a machine with no login
+/// screen until somebody reboots it.
+///
+/// Nothing but the compositor this daemon is about to start has any business
+/// binding a Wayland socket in this directory, so anything already there is
+/// stale by definition.
+fn clear_stale_wayland_sockets(runtime_dir: &Path) -> Result<()> {
+    let entries = std::fs::read_dir(runtime_dir)
+        .with_context(|| format!("cannot read {}", runtime_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", runtime_dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_wayland_socket_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "removed a stale Wayland socket"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("cannot remove the stale socket {}", path.display())));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `wayland-<n>` or `wayland-<n>.lock`, and nothing else -- not a directory
+/// called `wayland-things` somebody put there.
+fn is_wayland_socket_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("wayland-") else {
+        return false;
+    };
+    let digits = rest.strip_suffix(".lock").unwrap_or(rest);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The environment a process gets, built rather than inherited.
@@ -177,9 +229,14 @@ pub(crate) fn spawn_session(command: &str, account: &Account, runtime_dir: &Path
 /// yet is more code and more failure modes for a wait that nobody is timing.
 ///
 /// `wayland-0` is what a compositor with no `WAYLAND_DISPLAY` set picks; the
-/// scan covers `wayland-1` and up too, because a stale socket file from a
-/// previous boot makes the next compositor pick the next number, and hard-coding
+/// scan covers `wayland-1` and up too, because a lock file a compositor could
+/// not remove makes the next one pick the next number, and hard-coding
 /// `wayland-0` would then point the greeter at a socket nothing is listening on.
+///
+/// Only an actual socket counts. [`prepare_runtime_dir`] has already removed
+/// anything stale, but a regular file or directory with the right name must
+/// not be mistaken for a listening compositor either: pointing the greeter at
+/// one is exactly the failure the cleanup exists to prevent.
 pub(crate) fn wait_for_wayland_socket(
     runtime_dir: &Path,
     child: &mut Child,
@@ -196,7 +253,10 @@ pub(crate) fn wait_for_wayland_socket(
 
         for n in 0..8 {
             let name = format!("wayland-{n}");
-            if runtime_dir.join(&name).exists() {
+            let is_socket = std::fs::metadata(runtime_dir.join(&name))
+                .map(|m| m.file_type().is_socket())
+                .unwrap_or(false);
+            if is_socket {
                 tracing::info!(socket = %name, "compositor is listening");
                 return Ok(name);
             }
@@ -373,7 +433,8 @@ mod tests {
     fn an_existing_socket_is_found() {
         let dir = std::env::temp_dir().join(format!("ravend-wayland-ok-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("can create a test directory");
-        std::fs::write(dir.join("wayland-1"), b"").expect("can create a fake socket");
+        let _listener = std::os::unix::net::UnixListener::bind(dir.join("wayland-1"))
+            .expect("can bind a test socket");
 
         let mut child = Command::new("/bin/sleep")
             .arg("30")
@@ -388,6 +449,70 @@ mod tests {
 
         stop(&mut child, Duration::from_secs(2), "test sleep");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A regular file named like a socket is not a compositor. This is the
+    /// shape a stale entry takes once the listener is gone, and trusting it
+    /// is what pointed the greeter at nothing.
+    #[test]
+    fn a_plain_file_is_not_mistaken_for_a_socket() {
+        let dir = std::env::temp_dir().join(format!("ravend-wayland-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("can create a test directory");
+        std::fs::write(dir.join("wayland-1"), b"").expect("can create a fake file");
+
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("can run sleep");
+
+        let err = wait_for_wayland_socket(&dir, &mut child, Duration::from_millis(300))
+            .expect_err("a plain file must not count as a listening compositor");
+        assert!(
+            err.to_string().contains("no Wayland socket appeared"),
+            "{err}"
+        );
+
+        stop(&mut child, Duration::from_secs(2), "test sleep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stale sockets and lock files go; everything else in the directory
+    /// stays.
+    #[test]
+    fn stale_wayland_sockets_are_cleared() {
+        let dir = std::env::temp_dir().join(format!("ravend-wayland-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("can create a test directory");
+        {
+            let _l = std::os::unix::net::UnixListener::bind(dir.join("wayland-1"))
+                .expect("can bind a test socket");
+        }
+        std::fs::write(dir.join("wayland-1.lock"), b"").expect("can create a lock file");
+        std::fs::write(dir.join("wayland-0"), b"").expect("can create a stale file");
+        std::fs::write(dir.join("keep-me"), b"").expect("can create an unrelated file");
+        std::fs::create_dir(dir.join("wayland-things")).expect("can create an unrelated dir");
+
+        clear_stale_wayland_sockets(&dir).expect("cleanup succeeds");
+
+        assert!(!dir.join("wayland-1").exists());
+        assert!(!dir.join("wayland-1.lock").exists());
+        assert!(!dir.join("wayland-0").exists());
+        assert!(dir.join("keep-me").exists());
+        assert!(dir.join("wayland-things").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wayland_socket_names_are_recognised_precisely() {
+        assert!(is_wayland_socket_name("wayland-0"));
+        assert!(is_wayland_socket_name("wayland-12"));
+        assert!(is_wayland_socket_name("wayland-1.lock"));
+        assert!(!is_wayland_socket_name("wayland-"));
+        assert!(!is_wayland_socket_name("wayland-things"));
+        assert!(!is_wayland_socket_name("wayland-1.bak"));
+        assert!(!is_wayland_socket_name("greet.sock"));
     }
 
     /// `stop` must reap what it kills, and must return promptly for a process

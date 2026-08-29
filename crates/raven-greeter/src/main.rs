@@ -113,15 +113,16 @@ fn run() -> Result<()> {
             None
         }
     };
-    let wallpaper = configured
-        .or_else(wallpaper::installed)
-        .and_then(|path| match Wallpaper::load(&path) {
-            Ok(wallpaper) => Some(wallpaper),
-            Err(e) => {
-                tracing::warn!("ignoring the wallpaper: {e:#}");
-                None
-            }
-        });
+    let wallpaper =
+        configured
+            .or_else(wallpaper::installed)
+            .and_then(|path| match Wallpaper::load(&path) {
+                Ok(wallpaper) => Some(wallpaper),
+                Err(e) => {
+                    tracing::warn!("ignoring the wallpaper: {e:#}");
+                    None
+                }
+            });
 
     let conn = Connection::connect_to_env()
         .context("cannot connect to the Wayland display; is WAYLAND_DISPLAY set?")?;

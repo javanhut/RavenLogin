@@ -121,8 +121,8 @@ fn bind() -> Result<UnixListener> {
         std::fs::remove_file(path).ok();
     }
 
-    let listener = UnixListener::bind(path)
-        .with_context(|| format!("cannot bind {}", path.display()))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("cannot bind {}", path.display()))?;
 
     // World-connectable on purpose; see the module documentation. The peer
     // credential check, not the file mode, is what makes this safe.

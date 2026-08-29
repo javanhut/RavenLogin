@@ -39,8 +39,8 @@
 
 mod config;
 mod ratelimit;
-mod verify;
 mod session;
+mod verify;
 
 use std::io::{BufReader, BufWriter};
 use std::os::unix::fs::PermissionsExt;
@@ -117,17 +117,76 @@ fn run() -> Result<()> {
         config.ratelimit.into(),
     );
 
+    // Nothing past this point exits the daemon. Everything above -- the
+    // config, root, the greeter account, the socket -- is a precondition that
+    // cannot be retried into existence, and failing on it leaves the machine
+    // on its consoles with a clear message. Everything below is a child
+    // process, and a child that fails is a reason to bring the login screen
+    // back up, not to take the daemon down with it.
+    //
+    // The distinction is not tidiness. `raven-init` restarts a service that
+    // exits, but gives up on one that exits five times in a minute, and a
+    // greeter that dies in under a second does that in five seconds flat.
+    // From then on the machine has no login screen until it is rebooted.
+    // Retrying here, with a backoff, turns the same failure into a login
+    // screen that is a few seconds late -- and a log line each time saying
+    // exactly why.
+    let mut failures = Backoff::default();
     loop {
-        let account = greet(
+        let account = match greet(
             &config,
             &greeter_account,
             &listener,
             &authenticator,
             &mut limiter,
-        )?;
+        ) {
+            Ok(account) => account,
+            Err(e) => {
+                let wait = failures.next_delay();
+                tracing::error!("the login screen failed: {e:#}; retrying in {wait:?}");
+                std::thread::sleep(wait);
+                continue;
+            }
+        };
+        failures.reset();
+
         tracing::info!(user = %account.name, uid = account.uid, "starting session");
-        run_session(&config, &account)?;
+        if let Err(e) = run_session(&config, &account) {
+            // Could not even start it. Not the daemon's failure and not fatal:
+            // the person is standing in front of the screen, and the login
+            // screen is where they can be told.
+            tracing::error!(user = %account.name, "cannot run the session: {e:#}");
+        }
         tracing::info!(user = %account.name, "session ended; returning to the login screen");
+    }
+}
+
+/// How long to wait before bringing the login screen back after it failed.
+///
+/// Starts short, because the common failure is a race that is over by the
+/// time the retry happens, and doubles to a ceiling, because a compositor
+/// that cannot start at all should not be restarted ten times a second in
+/// front of somebody trying to read the error on tty2.
+#[derive(Debug, Default)]
+struct Backoff {
+    consecutive: u32,
+}
+
+impl Backoff {
+    const BASE: Duration = Duration::from_secs(1);
+    const MAX: Duration = Duration::from_secs(10);
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = Self::BASE
+            .checked_mul(1u32 << self.consecutive.min(4))
+            .unwrap_or(Self::MAX)
+            .min(Self::MAX);
+        self.consecutive = self.consecutive.saturating_add(1);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.consecutive = 0;
     }
 }
 
@@ -506,4 +565,25 @@ fn run_session(config: &Config, account: &Account) -> Result<()> {
         tracing::warn!(user = %account.name, %status, "the session exited badly");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_to_a_ceiling_and_resets() {
+        let mut b = Backoff::default();
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+        assert_eq!(b.next_delay(), Duration::from_secs(2));
+        assert_eq!(b.next_delay(), Duration::from_secs(4));
+        assert_eq!(b.next_delay(), Duration::from_secs(8));
+        assert_eq!(b.next_delay(), Duration::from_secs(10));
+        assert_eq!(b.next_delay(), Duration::from_secs(10));
+        for _ in 0..100 {
+            assert!(b.next_delay() <= Duration::from_secs(10));
+        }
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+    }
 }

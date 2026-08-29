@@ -631,12 +631,7 @@ impl OutputHandler for Lock {
     /// It needs a lock surface of its own, or it comes up showing whatever the
     /// compositor puts behind an uncovered output — which is the one way a
     /// session-lock client can leak the session it is holding.
-    fn new_output(
-        &mut self,
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
+    fn new_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
         if self.locked {
             self.cover(output, qh);
         }

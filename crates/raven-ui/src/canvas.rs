@@ -173,13 +173,7 @@ impl<'a> Canvas<'a> {
 
     /// The outline of a rounded rectangle, `thickness` wide, drawn inside the
     /// rectangle's bounds.
-    pub fn rounded_rect_outline(
-        &mut self,
-        rect: Rect,
-        radius: f32,
-        thickness: f32,
-        color: Color,
-    ) {
+    pub fn rounded_rect_outline(&mut self, rect: Rect, radius: f32, thickness: f32, color: Color) {
         self.rounded_rect_impl(rect, radius, color, Some(thickness.max(0.1)));
     }
 
@@ -223,14 +217,7 @@ impl<'a> Canvas<'a> {
     }
 
     /// A circular ring, `thickness` wide, centred on `radius`.
-    pub fn circle_outline(
-        &mut self,
-        cx: f32,
-        cy: f32,
-        radius: f32,
-        thickness: f32,
-        color: Color,
-    ) {
+    pub fn circle_outline(&mut self, cx: f32, cy: f32, radius: f32, thickness: f32, color: Color) {
         self.circle_impl(cx, cy, radius, color, Some(thickness.max(0.1)));
     }
 

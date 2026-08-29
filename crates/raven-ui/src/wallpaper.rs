@@ -498,7 +498,10 @@ mod tests {
 
     #[test]
     fn other_names_are_not() {
-        assert_eq!(choose(paths(&["cliff_arch_sea.jpg", "README"]).into_iter()), None);
+        assert_eq!(
+            choose(paths(&["cliff_arch_sea.jpg", "README"]).into_iter()),
+            None
+        );
         assert_eq!(choose(paths(&["wallpaper.old.png"]).into_iter()), None);
     }
 

@@ -47,11 +47,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use raven_greet_proto::User;
 use raven_ui::canvas::Canvas;
 use raven_ui::screen::{Message, MessageKind, PasswordScreen};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::Wallpaper;
-use raven_greet_proto::User;
 
 /// Parse `--preview`'s arguments and render.
 ///
