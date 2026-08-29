@@ -320,7 +320,7 @@ impl Lock {
                 self.draw_all(qh);
             }
             Err(e) => {
-                // The socket broke while the screen is up. This is the one
+                // The socket broke and a reconnect failed too. This is the one
                 // failure with no good answer: nobody can get in until the
                 // daemon comes back. Staying locked and saying so is still the
                 // right side to fail on -- exiting here would hand the session

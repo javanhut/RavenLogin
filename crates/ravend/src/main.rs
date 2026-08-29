@@ -416,12 +416,12 @@ fn serve(
         );
     }
 
-    // A greeter that connects and then says nothing must not hold the login
-    // screen hostage. These are generous -- somebody is typing a password on
-    // the other end -- but finite.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(300)))
-        .context("cannot set a read timeout")?;
+    // No read timeout: the greeter holds this one connection open for as long
+    // as the login screen is up, and a login screen nobody has touched for a
+    // while is the normal case, not a stuck client. Only the greeter's own uid
+    // (checked above) can connect, and a greeter that exits closes the socket,
+    // so there is nothing here for a timeout to guard against. Writes stay
+    // bounded so a greeter that stops reading cannot wedge this thread.
     stream
         .set_write_timeout(Some(Duration::from_secs(10)))
         .context("cannot set a write timeout")?;

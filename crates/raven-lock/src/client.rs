@@ -46,7 +46,31 @@ impl Client {
         })
     }
 
+    /// Send one request and wait for its reply, reconnecting once if the
+    /// connection turns out to be dead.
+    ///
+    /// The daemon hangs up on a connection that has been silent for a few
+    /// minutes, and it can also simply be restarted. Either way the socket
+    /// this process opened at startup is gone by the time someone next types a
+    /// password, and the failure that shows is a stale connection, not a
+    /// broken daemon. A fresh connect settles which it is: if that fails too,
+    /// the daemon really is unreachable and the error stands.
+    ///
+    /// Retrying is safe because a request that never got an answer was never
+    /// acted on: a stale socket fails on the write or on the very first read,
+    /// before the daemon has seen anything.
     fn exchange(&mut self, request: &Request) -> Result<Response> {
+        match self.try_exchange(request) {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                tracing::warn!("connection to ravend is dead ({e:#}); reconnecting");
+                *self = Self::connect().context("cannot reconnect to ravend")?;
+                self.try_exchange(request)
+            }
+        }
+    }
+
+    fn try_exchange(&mut self, request: &Request) -> Result<Response> {
         raven_greet_proto::write_message(&mut self.writer, request)
             .context("cannot send a request to ravend")?;
         raven_greet_proto::read_message(&mut self.reader).context("cannot read a reply from ravend")

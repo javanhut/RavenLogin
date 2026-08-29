@@ -306,9 +306,10 @@ impl Greeter {
                 self.screen.set_idle();
             }
             Err(e) => {
-                // The socket broke. There is no way to log in from here and no
-                // way to recover, so say something true and stay up rather than
-                // exiting into a black screen.
+                // The socket broke and a reconnect failed too, so the daemon
+                // itself is unreachable. There is nothing to do from here but
+                // say something true and stay up rather than exiting into a
+                // black screen; the next attempt will try to reconnect again.
                 tracing::error!("cannot reach ravend: {e:#}");
                 self.screen.set_message(Some(Message {
                     text: "Lost contact with the login service.".to_string(),
