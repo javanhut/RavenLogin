@@ -154,6 +154,53 @@ fn base_environment(account: &Account, runtime_dir: &Path) -> BTreeMap<String, S
     env
 }
 
+/// Where the system's locale lives; the same file `/etc/profile` sources.
+const LOCALE_CONF: &str = "/etc/locale.conf";
+
+/// The locale a session should run in, from `/etc/locale.conf`.
+///
+/// Without this every graphical program runs in the C locale, because the
+/// environment is built from nothing and only shells ever source
+/// `locale.conf`. The C locale is not merely a cosmetic problem: GLib's option
+/// parser converts arguments through it, so `zenity --ok-label "😺"` — which
+/// `spotify-launcher` really passes — is rejected as "This option is not
+/// available", the launcher's progress pipe breaks, and Spotify never
+/// downloads. A terminal run works, because the terminal's shell read
+/// `/etc/profile`; only launches from the desktop fail.
+///
+/// Only `LANG`, `LANGUAGE` and `LC_*` are honoured, and the file is read as
+/// `KEY=value` lines rather than sourced — nothing here goes near a shell.
+/// A missing or unreadable file is an empty map, not an error: a system with
+/// no locale configured gets exactly what it has now.
+fn locale_environment(path: &Path) -> BTreeMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    parse_locale_conf(&text)
+}
+
+/// The `KEY=value` lines of a `locale.conf`, restricted to locale variables.
+fn parse_locale_conf(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .filter(|(key, _)| *key == "LANG" || *key == "LANGUAGE" || key.starts_with("LC_"))
+        .map(|(key, value)| {
+            // Both quoting styles appear in the wild; `/etc/environment`
+            // writes `LANG="en_US.UTF-8"` and `locale.conf` writes it bare.
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value);
+            (key.to_string(), value.to_string())
+        })
+        .filter(|(_, value)| !value.is_empty())
+        .collect()
+}
+
 /// Start a program as `account`, with a built environment.
 ///
 /// stdin is `/dev/null` and stdout/stderr are inherited, so a compositor's
@@ -170,6 +217,7 @@ fn spawn_as(
     command
         .env_clear()
         .envs(base_environment(account, runtime_dir))
+        .envs(locale_environment(Path::new(LOCALE_CONF)))
         .current_dir(if Path::new(&account.home).is_dir() {
             account.home.as_str()
         } else {
@@ -381,6 +429,28 @@ mod tests {
         // And in particular, nothing this process happens to have.
         assert!(!env.contains_key("CARGO"));
         assert!(!env.contains_key("PWD"));
+    }
+
+    #[test]
+    fn locale_conf_yields_lang_and_lc_variables_only() {
+        let env = parse_locale_conf(
+            "# comment\n\nLANG=en_US.UTF-8\nLC_TIME=\"de_DE.UTF-8\"\nLC_PAPER='en_GB.UTF-8'\n  LANGUAGE = en \nPATH=/evil\nHOME=/evil\nLC_ALL=\n",
+        );
+        assert_eq!(env.get("LANG").map(String::as_str), Some("en_US.UTF-8"));
+        assert_eq!(env.get("LC_TIME").map(String::as_str), Some("de_DE.UTF-8"));
+        assert_eq!(env.get("LC_PAPER").map(String::as_str), Some("en_GB.UTF-8"));
+        assert_eq!(env.get("LANGUAGE").map(String::as_str), Some("en"));
+        // Anything that is not a locale variable cannot ride in on this file.
+        assert!(!env.contains_key("PATH"));
+        assert!(!env.contains_key("HOME"));
+        // An empty assignment is no assignment: `LC_ALL=` must not export a
+        // blank LC_ALL, which would override every other LC_* with nothing.
+        assert!(!env.contains_key("LC_ALL"));
+    }
+
+    #[test]
+    fn a_missing_locale_conf_is_an_empty_environment() {
+        assert!(locale_environment(Path::new("/nonexistent/locale.conf")).is_empty());
     }
 
     /// An account with no attached groups must still get its primary gid, or
