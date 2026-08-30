@@ -109,7 +109,7 @@ if [ -f "${DROPIN_DIR}/seatd.toml" ]; then
 fi
 
 # --- binaries --------------------------------------------------------------
-for bin in ravend raven-greeter; do
+for bin in ravend raven-greeter raven-lock; do
     if [ -e "${PREFIX}/bin/${bin}" ]; then
         rm -f "${PREFIX}/bin/${bin}"
         echo "ok    removed ${PREFIX}/bin/${bin}"

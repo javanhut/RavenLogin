@@ -60,14 +60,20 @@ install -d -m 0755 "${GREETER_HOME}"
 chown "${GREETER_USER}:${GREETER_USER}" "${GREETER_HOME}"
 
 # --- binaries --------------------------------------------------------------
-if [ ! -x target/release/ravend ] || [ ! -x target/release/raven-greeter ]; then
+if [ ! -x target/release/ravend ] || [ ! -x target/release/raven-greeter ] \
+    || [ ! -x target/release/raven-lock ]; then
     echo "Build first: cargo build --release" >&2
     exit 1
 fi
 
 install -D -m 0755 target/release/ravend        "${PREFIX}/bin/ravend"
 install -D -m 0755 target/release/raven-greeter "${PREFIX}/bin/raven-greeter"
-echo "ok    installed ravend and raven-greeter into ${PREFIX}/bin"
+# huginn spawns this by name to lock the session. It is a separate binary
+# from the greeter on purpose (see crates/raven-lock), so it has to be
+# installed separately -- and an old copy left behind is a lock screen that
+# dies on its first frame whenever the protocol handling has moved on.
+install -D -m 0755 target/release/raven-lock    "${PREFIX}/bin/raven-lock"
+echo "ok    installed ravend, raven-greeter and raven-lock into ${PREFIX}/bin"
 
 # --- config ----------------------------------------------------------------
 #
