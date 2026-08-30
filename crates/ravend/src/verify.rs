@@ -51,11 +51,13 @@ use crate::ratelimit::{Limits, RateLimiter};
 
 /// How long a connection may sit silent before it is dropped.
 ///
-/// Longer than a person takes to type a password, shorter than a process can
-/// usefully squat on the socket for. The lock screen holds one connection open
-/// for as long as the screen is up, so this is a limit on *silence*, not on the
-/// life of the connection: every message read resets it.
-const READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// The lock screen holds one connection open for as long as the screen is up,
+/// and a locked machine routinely sits untouched overnight, so this has to be
+/// measured in hours, not minutes: a five-minute limit meant every unlock after
+/// a real absence hit a dead socket first. It is a limit on *silence*, not on
+/// the life of the connection: every message read resets it. Squatting is
+/// bounded by `MAX_CONNECTIONS`, not by this.
+const READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long a write may block.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);

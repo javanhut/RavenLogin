@@ -154,9 +154,10 @@ fn run() -> Result<()> {
     layer.set_exclusive_zone(-1);
     layer.commit();
 
-    // Sized for a common panel; the pool grows when the configure says the
-    // screen is bigger.
-    let pool = SlotPool::new(1920 * 1080 * 4, &shm).context("cannot create an shm pool")?;
+    // Sized for a common panel at 2x, the largest scale a compositor
+    // advertises to us; the pool grows when the configure says the screen is
+    // bigger still.
+    let pool = SlotPool::new(1920 * 1080 * 4 * 4, &shm).context("cannot create an shm pool")?;
 
     let mut greeter = Greeter {
         registry_state: RegistryState::new(&globals),
@@ -235,7 +236,13 @@ impl Greeter {
         if self.width == 0 || self.height == 0 {
             return;
         }
-        let (width, height) = (self.width as i32, self.height as i32);
+        // The configure is in logical pixels, and `set_buffer_scale` tells
+        // the compositor this buffer is `scale` times denser than that. So the
+        // buffer itself must be `scale` times larger, or the compositor shows
+        // it at a fraction of the screen. `screen.draw` scales its layout by
+        // the same factor, so the two agree.
+        let scale = self.scale.max(1.0) as i32;
+        let (width, height) = (self.width as i32 * scale, self.height as i32 * scale);
         let stride = width * 4;
 
         let (buffer, data) =
