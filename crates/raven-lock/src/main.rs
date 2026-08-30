@@ -212,7 +212,20 @@ impl Lock {
             return;
         }
 
-        let (width, height, scale) = (output.width as i32, output.height as i32, output.scale);
+        // The configure is in logical pixels, and `set_buffer_scale` tells
+        // the compositor this buffer is `scale` times denser than that. So the
+        // buffer itself must be `scale` times larger, or the compositor sees a
+        // surface a fraction of the size it configured -- which for a lock
+        // surface is not a small picture but a protocol error, and a lock
+        // screen that dies on its first frame leaves a locked session with
+        // nothing to type a password into. `screen.draw` scales its layout by
+        // the same factor, so the two agree.
+        let scale = output.scale.max(1.0);
+        let factor = scale as i32;
+        let (width, height) = (
+            output.width as i32 * factor,
+            output.height as i32 * factor,
+        );
         let stride = width * 4;
 
         let (buffer, data) =
