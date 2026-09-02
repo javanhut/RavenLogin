@@ -241,13 +241,27 @@ fn spawn_as(
         .with_context(|| format!("cannot start {program} as {}", account.name))
 }
 
+/// The variable that tells the greeter's compositor what it is hosting.
+///
+/// Set on the compositor started for the greeter and on nothing else: not the
+/// greeter UI, not a session. A compositor that is also a session compositor
+/// (huginn is) has a lock screen, an idle timer and a lock on resume, and every
+/// one of them is wrong here. There is no session behind the login screen to
+/// hide, and a `raven-lock` started by the greeter's compositor asks the verify
+/// socket whose session it is, is told the greeter account is not one, and
+/// exits -- leaving the compositor's blank up until it gives up on it, and the
+/// idle timer to do it all again a minute later. The login screen went black
+/// for ten seconds in every sixty. huginn reads this and does not lock; a
+/// compositor that does not know the variable ignores it.
+pub(crate) const GREETER_ENV: (&str, &str) = ("RAVEN_GREETER", "1");
+
 /// Start the compositor that will host the greeter.
 pub(crate) fn spawn_greeter_compositor(
     compositor: &str,
     account: &Account,
     runtime_dir: &Path,
 ) -> Result<Child> {
-    spawn_as(compositor, account, runtime_dir, &[])
+    spawn_as(compositor, account, runtime_dir, &[GREETER_ENV])
 }
 
 /// Start the greeter UI, pointed at the compositor's socket.

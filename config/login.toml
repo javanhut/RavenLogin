@@ -17,7 +17,10 @@
 # `scripts/install.sh` creates it.
 user = "raven-greeter"
 
-# The compositor to host the greeter in, and the greeter itself.
+# The compositor to host the greeter in, and the greeter itself. The
+# compositor is started with RAVEN_GREETER=1 in its environment, which is how
+# huginn knows not to run its lock screen over a login screen; another
+# compositor can ignore it.
 compositor = "huginn"
 command = "raven-greeter"
 

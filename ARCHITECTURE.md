@@ -59,6 +59,26 @@ So this surface is not a security boundary the way a lock screen is. It does
 not have to be. `ravend` is what enforces who may log in, and it would enforce
 it identically if the greeter were replaced with a hostile one.
 
+## Why the greeter's compositor is told what it is
+
+`ravend` exports `RAVEN_GREETER=1` to the compositor it starts for the greeter,
+and to nothing else. huginn is a session compositor first, and a session
+compositor locks: after ten idle minutes, on `Super`+`L`, and on every resume
+from suspend. Hosting the login screen, each of those is a mistake with the
+same shape. There is no session behind the greeter to hide, and the
+`raven-lock` it starts asks the verify socket whose session this is, is told
+the greeter account is not one, and exits -- so the compositor's pre-emptive
+blank stays up until its claim timeout reveals the greeter again, and the idle
+timer, still past its mark, does it all over a minute later. The symptom was a
+login screen that faded to black for ten seconds in every sixty and took no
+keystrokes while dark.
+
+The compositor is told rather than left to infer it -- from its uid, from
+having exactly one layer-shell client, from the lock screen's refusal --
+because every inference is a session compositor's ordinary state some of the
+time. A compositor that does not know the variable ignores it, which is the
+right failure for a `compositor =` somebody has pointed elsewhere.
+
 ## The verify socket
 
 `raven-lock` needs what the greeter needs — somebody who can read `/etc/shadow`
