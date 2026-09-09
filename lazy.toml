@@ -33,16 +33,19 @@ run = [
 ]
 
 [commands.install]
-desc = "Build release, install, and wire into raven-init (needs root)"
+desc = "Build release, install, and wire into raven-init"
 dep = ["build"]
-run = ["sudo ./scripts/install.sh"]
+escalate = true
+run = ["./scripts/install.sh"]
 
 # Spelled out because it must exist. Without it, imlazy fuzzy-matches
 # `uninstall` to `install` and cheerfully installs what you asked it to remove.
 [commands.uninstall]
-desc = "Unwire from raven-init and remove the binaries (needs root)"
-run = ["sudo ./scripts/uninstall.sh"]
+desc = "Unwire from raven-init and remove the binaries"
+escalate = true
+run = ["./scripts/uninstall.sh"]
 
 [commands.purge]
 desc = "Uninstall, and also remove login.toml and the raven-greeter account"
-run = ["sudo ./scripts/uninstall.sh --purge"]
+escalate = true
+run = ["./scripts/uninstall.sh --purge"]
