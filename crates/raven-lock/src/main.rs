@@ -25,6 +25,24 @@
 //! name an account, cannot start a session, and never sees a password hash.
 //! `ravend` answers from the connection's credentials; see `raven-lock`'s
 //! `client` module and the daemon's `verify`.
+//!
+//! # Leaving
+//!
+//! The right password does not cut straight to the desktop. The padlock on
+//! the screen opens and the screen lifts away, and the compositor is told to
+//! reveal the session only once it has -- so what somebody sees is the lock
+//! letting go, rather than a frame with a lock screen on it followed by a
+//! frame without. That takes a few hundred milliseconds of frames, which
+//! the compositor paces.
+//!
+//! It must not be able to take forever. The frames come from the compositor,
+//! and a compositor that has turned the panel off, or has simply stopped
+//! sending frame callbacks, would leave the session verified and never
+//! revealed -- which is the one failure a lock screen must never have. So a
+//! timer runs alongside, and the unlock goes out when the screen says it has
+//! finished *or* when the timer says it has had long enough, whichever is
+//! first. That timer is why this binary has an event loop and not just a
+//! `blocking_dispatch`.
 
 mod client;
 
@@ -37,6 +55,9 @@ use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::{self, Wallpaper};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, FrameCallbackData};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
+use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
+use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::{
     wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface,
@@ -56,6 +77,19 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_registry, registry_handlers};
 
 use crate::client::{Attempt, Client};
+
+/// How long the screen gets to finish leaving after the password is
+/// accepted, before the session is revealed regardless.
+///
+/// The departure takes about 400 ms when frames are flowing. This is
+/// comfortably past that, and still short enough that a compositor which has
+/// stopped drawing does not keep somebody who has typed the right password
+/// waiting in front of a screen that will not go away.
+const UNLOCK_DEADLINE: Duration = Duration::from_millis(900);
+
+/// Set in the environment to cross-fade instead of move. See
+/// [`PasswordScreen::set_reduced_motion`].
+const REDUCE_MOTION_VAR: &str = "RAVEN_REDUCE_MOTION";
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt().init();
@@ -94,9 +128,15 @@ fn run() -> Result<()> {
 
     let conn = Connection::connect_to_env()
         .context("cannot connect to the Wayland display; is WAYLAND_DISPLAY set?")?;
-    let (globals, mut queue) =
+    let (globals, queue) =
         registry_queue_init(&conn).context("cannot initialize the Wayland registry")?;
     let qh = queue.handle();
+
+    let mut event_loop: EventLoop<'static, Lock> =
+        EventLoop::try_new().context("cannot create an event loop")?;
+    WaylandSource::new(conn.clone(), queue)
+        .insert(event_loop.handle())
+        .context("cannot add the Wayland connection to the event loop")?;
 
     let compositor =
         CompositorState::bind(&globals, &qh).context("the compositor has no wl_compositor")?;
@@ -126,9 +166,11 @@ fn run() -> Result<()> {
         keyboard: None,
         ctrl: false,
         exit: false,
+        loop_handle: event_loop.handle(),
         screen: {
             let mut screen = PasswordScreen::locked(user);
             screen.set_wallpaper(wallpaper);
+            screen.set_reduced_motion(reduce_motion());
             screen
         },
         text: TextRenderer::new(),
@@ -136,9 +178,9 @@ fn run() -> Result<()> {
     };
 
     while !state.exit {
-        queue
-            .blocking_dispatch(&mut state)
-            .context("the Wayland connection failed")?;
+        event_loop
+            .dispatch(None, &mut state)
+            .context("the event loop failed")?;
     }
 
     // The unlock request has been sent but not necessarily flushed. Without
@@ -183,6 +225,8 @@ struct Lock {
     /// Whether Control is held; see the greeter for the Ctrl-U trap this avoids.
     ctrl: bool,
     exit: bool,
+    /// For the unlock deadline; see the module header.
+    loop_handle: LoopHandle<'static, Lock>,
 
     screen: PasswordScreen,
     text: TextRenderer,
@@ -222,10 +266,7 @@ impl Lock {
         // the same factor, so the two agree.
         let scale = output.scale.max(1.0);
         let factor = scale as i32;
-        let (width, height) = (
-            output.width as i32 * factor,
-            output.height as i32 * factor,
-        );
+        let (width, height) = (output.width as i32 * factor, output.height as i32 * factor);
         let stride = width * 4;
 
         let (buffer, data) =
@@ -260,6 +301,27 @@ impl Lock {
             return;
         }
         surface.commit();
+
+        // The screen has finished leaving; let the session through.
+        if self.screen.is_dismissed() {
+            self.finish_unlock();
+        }
+    }
+
+    /// Tell the compositor to reveal the session, and leave.
+    ///
+    /// Idempotent, because it has two callers -- the frame that finishes the
+    /// departure, and the deadline timer -- and whichever is second must be
+    /// a no-op rather than a second `unlock` on a lock that is gone.
+    fn finish_unlock(&mut self) {
+        // Order matters. `unlock` is what tells the compositor it may reveal
+        // the session; until it is called, dropping this process leaves the
+        // screen locked, which is the behaviour we want on every other path
+        // out of here.
+        if let Some(lock) = self.lock.take() {
+            lock.unlock();
+        }
+        self.exit = true;
     }
 
     /// Draw every output. Used when the screen's contents changed rather than
@@ -303,14 +365,28 @@ impl Lock {
         match self.daemon.verify(password) {
             Ok(Attempt::Verified) => {
                 tracing::info!("password accepted");
-                // Order matters. `unlock` is what tells the compositor it may
-                // reveal the session; until it is called, dropping this process
-                // leaves the screen locked, which is the behaviour we want on
-                // every other path out of here.
-                if let Some(lock) = self.lock.take() {
-                    lock.unlock();
+                // Open the lock on screen; the frames finish it, and the
+                // timer makes sure of it. See the module header.
+                self.screen.dismiss();
+                self.draw_all(qh);
+                let timer = Timer::from_duration(UNLOCK_DEADLINE);
+                if let Err(e) = self
+                    .loop_handle
+                    .insert_source(timer, |_, _, lock: &mut Lock| {
+                        if !lock.exit {
+                            tracing::warn!(
+                                "the screen did not finish leaving in time; unlocking anyway"
+                            );
+                        }
+                        lock.finish_unlock();
+                        TimeoutAction::Drop
+                    })
+                {
+                    // No timer means no safety net, and a safety net that
+                    // cannot be hung is worth more than the departure: go now.
+                    tracing::error!("cannot arm the unlock deadline ({e}); unlocking now");
+                    self.finish_unlock();
                 }
-                self.exit = true;
             }
             Ok(Attempt::Denied {
                 message,
@@ -679,8 +755,14 @@ impl ProvidesRegistryState for Lock {
 
 smithay_client_toolkit::delegate_dispatch2!(Lock);
 
-/// Kept so the throttle's `Duration` crosses from `client` into the screen.
-const _: Option<Duration> = None;
+/// Whether the environment asks for reduced motion.
+///
+/// `RAVEN_REDUCE_MOTION=1` in the session's environment, which is where an
+/// accessibility preference on this desktop lives until there is somewhere
+/// better. Anything but empty or `0` counts.
+fn reduce_motion() -> bool {
+    std::env::var_os(REDUCE_MOTION_VAR).is_some_and(|v| !v.is_empty() && v != "0")
+}
 
 #[cfg(test)]
 mod tests {

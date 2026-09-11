@@ -1,10 +1,17 @@
 //! `raven-greeter --preview OUT.png [WIDTHxHEIGHT] [STATE] [--wallpaper PATH]
-//! [--force]` — render one frame to a file and exit.
+//! [--lock] [--at MS] [--force]` — render one frame to a file and exit.
 //!
 //! `OUT.png` is written, not read. It is the first argument because the flag
 //! is `--preview <where to put it>`, and a wallpaper to render *behind* the
 //! screen is a named `--wallpaper` rather than a fifth positional so that the
 //! two paths cannot be confused for one another.
+//!
+//! `--lock` renders the lock screen rather than the login screen: one
+//! account, and the lock screen's words. `--at MS` renders the frame that
+//! many milliseconds after the state was entered, with everything before it
+//! already settled -- so `denied --at 60` is the field mid-shake and
+//! `unlocking --at 250` is the padlock open and the screen half gone. Without
+//! it, the frame is the state at rest.
 //!
 //! # Not overwriting things
 //!
@@ -47,11 +54,20 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use std::time::{Duration, Instant};
+
 use raven_greet_proto::User;
 use raven_ui::canvas::Canvas;
 use raven_ui::screen::{Message, MessageKind, PasswordScreen};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::Wallpaper;
+
+/// How long the screen is given to arrive and settle before the state is
+/// applied. Two seconds is past every spring on it.
+const SETTLE: Duration = Duration::from_secs(2);
+
+/// The frame interval the preview steps the motion at.
+const STEP: Duration = Duration::from_millis(8);
 
 /// Parse `--preview`'s arguments and render.
 ///
@@ -60,6 +76,8 @@ pub(crate) fn main(args: &[String]) -> Result<()> {
     let mut positional = Vec::new();
     let mut wallpaper: Option<&str> = None;
     let mut force = false;
+    let mut lock = false;
+    let mut at = Duration::ZERO;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -69,6 +87,15 @@ pub(crate) fn main(args: &[String]) -> Result<()> {
                     .next()
                     .context("--wallpaper needs the path to an image")?;
                 wallpaper = Some(path);
+            }
+            "--lock" => lock = true,
+            "--at" => {
+                let ms: u64 = rest
+                    .next()
+                    .context("--at needs a number of milliseconds")?
+                    .parse()
+                    .context("--at needs a number of milliseconds")?;
+                at = Duration::from_millis(ms);
             }
             "--force" => force = true,
             other if other.starts_with("--") => anyhow::bail!("unknown option {other}"),
@@ -86,7 +113,10 @@ pub(crate) fn main(args: &[String]) -> Result<()> {
     let state = positional
         .get(2)
         .map_or(Some(State::Empty), |s| State::parse(s))
-        .context("the state should be one of: empty, typing, denied, caps")?;
+        .context(
+            "the state should be one of: empty, typing, denied, caps, busy, throttled, \
+             unlocking, arriving",
+        )?;
     if let Some(extra) = positional.get(3) {
         anyhow::bail!("unexpected argument {extra}");
     }
@@ -104,63 +134,125 @@ pub(crate) fn main(args: &[String]) -> Result<()> {
         check_overwrite(path)?;
     }
 
-    render(path, width, height, state, wallpaper)?;
-    tracing::info!(path = %path.display(), width, height, ?state, "preview written");
+    render(path, width, height, state, wallpaper, lock, at)?;
+    tracing::info!(path = %path.display(), width, height, ?state, lock, at_ms = at.as_millis(), "preview written");
     Ok(())
 }
 
 /// Render one frame and write it to `path`.
+///
+/// `at` is how far into the state's motion the frame is; see the module
+/// header. Zero means at rest.
 pub(crate) fn render(
     path: &Path,
     width: i32,
     height: i32,
     state: State,
     wallpaper: Option<Wallpaper>,
+    lock: bool,
+    at: Duration,
 ) -> Result<()> {
     let mut text = TextRenderer::new();
 
     // Stand-in accounts, so a preview on a build host looks like a preview on
     // a real machine rather than an empty screen.
-    let mut screen = PasswordScreen::new(vec![
-        User {
-            name: "javan".to_string(),
-            display_name: "Javan Hutchinson".to_string(),
-            initial: 'J',
-        },
-        User {
-            name: "second".to_string(),
-            display_name: "Second Account".to_string(),
-            initial: 'S',
-        },
-    ]);
+    let javan = User {
+        name: "javan".to_string(),
+        display_name: "Javan Hutchinson".to_string(),
+        initial: 'J',
+    };
+    let mut screen = if lock {
+        PasswordScreen::locked(javan)
+    } else {
+        PasswordScreen::new(vec![
+            javan,
+            User {
+                name: "second".to_string(),
+                display_name: "Second Account".to_string(),
+                initial: 'S',
+            },
+        ])
+    };
 
     screen.set_wallpaper(wallpaper);
 
+    // Let the screen arrive. Typing is part of the state, and typed before the
+    // settle, so a `typing` frame shows the dots at rest rather than popping.
+    let mut now = Instant::now();
+    let typed = matches!(
+        state,
+        State::Typing | State::Busy | State::Denied | State::Throttled | State::Unlocking
+    );
+    if typed {
+        for c in "hunter2".chars() {
+            screen.push_char(c);
+        }
+    }
+    if state != State::Arriving {
+        now = settle(&mut screen, now, SETTLE);
+    }
+
     match state {
-        State::Empty => {}
-        State::Typing => {
-            for c in "hunter2".chars() {
-                screen.push_char(c);
-            }
+        State::Empty | State::Typing | State::Arriving => {}
+        State::CapsLock => screen.set_caps_lock(true),
+        State::Busy => {
+            let _ = screen.submit(now);
         }
         State::Denied => {
+            let _ = screen.submit(now);
             screen.set_message(Some(Message {
                 text: "Incorrect password.".to_string(),
                 kind: MessageKind::Error,
             }));
+            screen.set_idle();
         }
-        State::CapsLock => screen.set_caps_lock(true),
+        State::Throttled => {
+            let _ = screen.submit(now);
+            screen.throttle_until(Duration::from_secs(30));
+            screen.set_message(Some(Message {
+                text: "Incorrect password.".to_string(),
+                kind: MessageKind::Error,
+            }));
+            screen.set_idle();
+        }
+        State::Unlocking => {
+            let _ = screen.submit(now);
+            screen.dismiss();
+        }
     }
+    // At rest means settled again, except for the states that are only ever
+    // in motion: those are shown at a representative moment.
+    let at = if at.is_zero() {
+        match state {
+            State::Unlocking => Duration::from_millis(180),
+            State::Arriving => Duration::from_millis(120),
+            State::Busy => Duration::from_millis(400),
+            _ => SETTLE,
+        }
+    } else {
+        at
+    };
+    now = settle(&mut screen, now, at);
 
     let mut data = vec![0u8; (width * height * 4) as usize];
     {
         let mut canvas = Canvas::new(&mut data, width, height);
-        screen.draw(&mut canvas, &mut text, 1.0, std::time::Instant::now());
+        screen.draw(&mut canvas, &mut text, 1.0, now);
     }
 
     let png = encode_png(&data, width as u32, height as u32);
     std::fs::write(path, png).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(())
+}
+
+/// Step the screen's motion forward by `by` from `now`, without drawing.
+fn settle(screen: &mut PasswordScreen, mut now: Instant, by: Duration) -> Instant {
+    let end = now + by;
+    while now < end {
+        now = (now + STEP).min(end);
+        screen.advance(now);
+    }
+    now
 }
 
 /// Which of the screen's states to render.
@@ -170,6 +262,14 @@ pub(crate) enum State {
     Typing,
     Denied,
     CapsLock,
+    /// An attempt in flight: the spinner.
+    Busy,
+    /// Denied, and told to wait: the countdown.
+    Throttled,
+    /// Accepted: the padlock opening and the screen leaving.
+    Unlocking,
+    /// The first frames: the screen settling into place.
+    Arriving,
 }
 
 impl State {
@@ -179,6 +279,10 @@ impl State {
             "typing" => Some(Self::Typing),
             "denied" => Some(Self::Denied),
             "caps" => Some(Self::CapsLock),
+            "busy" => Some(Self::Busy),
+            "throttled" => Some(Self::Throttled),
+            "unlocking" => Some(Self::Unlocking),
+            "arriving" => Some(Self::Arriving),
             _ => None,
         }
     }

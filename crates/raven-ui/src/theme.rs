@@ -65,6 +65,26 @@ impl Color {
         let alpha = (f32::from(self.alpha()) * factor.clamp(0.0, 1.0)) as u8;
         self.with_alpha(alpha)
     }
+
+    /// `t` of the way from this colour to `other`, every channel included.
+    ///
+    /// A straight lerp in sRGB, which is not colorimetrically honest but is
+    /// what every state transition on the screen wants: the border going from
+    /// accent to error has to pass through *something*, and the something
+    /// only has to look like neither for a few frames.
+    #[must_use]
+    pub fn mix(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let channel = |a: u8, b: u8| -> u32 {
+            (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u32
+        };
+        Self(
+            (channel(self.alpha(), other.alpha()) << 24)
+                | (channel(self.red(), other.red()) << 16)
+                | (channel(self.green(), other.green()) << 8)
+                | channel(self.blue(), other.blue()),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,10 +131,23 @@ pub const SCRIM: Color = BACKDROP.with_alpha(0xC8);
 /// a screen nobody asked to change.
 pub const TEXT_DIM_ON_WALLPAPER: Color = Color::from_argb(0xFF8A_93BE);
 
-/// The card the prompt sits on.
+/// The card the prompt sits on, when there is nothing to see through it.
 pub const SURFACE: Color = Color::from_argb(0xFF1A_1B26);
 
-/// Hairline borders.
+/// The tint laid over blurred wallpaper to make a material.
+///
+/// The field and the avatar are not opaque cards. They are the wallpaper
+/// behind them, blurred until it is only colour, with this over it -- so they
+/// sit *in* the picture rather than on top of it, and their colour follows
+/// the picture from one machine to the next. The alpha is set so the darkest
+/// result ([`SURFACE`] over a scrimmed black photograph) and the lightest
+/// (over a scrimmed white one) both keep [`TEXT`] past 4.5:1.
+pub const MATERIAL: Color = SURFACE.with_alpha(0x8C);
+
+/// Where the material catches the light: a hairline at its edge.
+pub const MATERIAL_EDGE: Color = Color::from_argb(0x2EFF_FFFF);
+
+/// Hairline borders on an opaque surface.
 pub const BORDER: Color = Color::from_argb(0xFF2A_2E45);
 
 /// Focus rings and the caret. huginn's `ACCENT`.
@@ -144,27 +177,46 @@ pub const SUCCESS: Color = Color::from_argb(0xFF9E_CE6A);
 /// a HiDPI panel as on a 96dpi one.
 pub const CARD_WIDTH: f32 = 380.0;
 
-pub const AVATAR_RADIUS: f32 = 44.0;
-pub const AVATAR_RING: f32 = 2.0;
+pub const AVATAR_RADIUS: f32 = 34.0;
+pub const AVATAR_RING: f32 = 1.0;
 
-pub const FIELD_HEIGHT: f32 = 44.0;
-pub const FIELD_RADIUS: f32 = 10.0;
-pub const FIELD_BORDER: f32 = 1.5;
+/// The field is a capsule: its radius is half its height, always.
+pub const FIELD_WIDTH: f32 = 236.0;
+pub const FIELD_HEIGHT: f32 = 36.0;
+pub const FIELD_BORDER: f32 = 1.0;
+/// The focus halo, outside the border.
+pub const FIELD_HALO: f32 = 3.0;
 
 /// The dots that stand in for the password.
-pub const DOT_RADIUS: f32 = 4.0;
-pub const DOT_SPACING: f32 = 14.0;
+pub const DOT_RADIUS: f32 = 3.5;
+pub const DOT_SPACING: f32 = 11.0;
 /// Beyond this many, the row stops growing and just stays full — a password
 /// whose length is legible from across the room is a password leaked to
 /// anybody watching.
 pub const DOT_MAX: usize = 12;
 
-pub const CLOCK_SIZE: f32 = 72.0;
-pub const DATE_SIZE: f32 = 16.0;
-pub const NAME_SIZE: f32 = 20.0;
-pub const BODY_SIZE: f32 = 14.0;
+/// The indeterminate spinner beside the field while an attempt is checked.
+pub const SPINNER_RADIUS: f32 = 7.0;
+pub const SPINNER_STROKE: f32 = 2.0;
+
+/// The padlock above the clock.
+pub const LOCK_WIDTH: f32 = 14.0;
+
+// Type. Sizes are in logical pixels; tracking is in ems and is specific to
+// the size, which is the whole reason it is set per style rather than once.
+// Large text wants to be tighter than the font's default spacing, small text
+// a touch looser, and one value would be wrong at one end or the other.
+pub const CLOCK_SIZE: f32 = 108.0;
+pub const CLOCK_TRACKING: f32 = -0.06;
+pub const DATE_SIZE: f32 = 17.0;
+pub const DATE_TRACKING: f32 = 0.0;
+pub const NAME_SIZE: f32 = 17.0;
+pub const NAME_TRACKING: f32 = -0.01;
+pub const BODY_SIZE: f32 = 13.5;
+pub const BODY_TRACKING: f32 = 0.0;
 pub const SMALL_SIZE: f32 = 12.5;
-pub const AVATAR_SIZE: f32 = 36.0;
+pub const SMALL_TRACKING: f32 = 0.01;
+pub const AVATAR_SIZE: f32 = 30.0;
 
 #[cfg(test)]
 mod tests {
@@ -188,6 +240,16 @@ mod tests {
         assert_eq!(c.blue(), ACCENT.blue());
     }
 
+    #[test]
+    fn mixing_lands_between_and_is_clamped() {
+        assert_eq!(ACCENT.mix(ERROR, 0.0), ACCENT);
+        assert_eq!(ACCENT.mix(ERROR, 1.0), ERROR);
+        assert_eq!(ACCENT.mix(ERROR, 7.0), ERROR);
+        let mid = ACCENT.mix(ERROR, 0.5);
+        assert!(mid.red() > ACCENT.red() && mid.red() < ERROR.red());
+        assert_eq!(mid.alpha(), 0xFF);
+    }
+
     /// sRGB relative luminance, per WCAG.
     fn luminance(c: Color) -> f32 {
         let channel = |v: u8| {
@@ -207,15 +269,23 @@ mod tests {
         (lighter + 0.05) / (darker + 0.05)
     }
 
-    /// A wallpaper of solid `value`, with [`SCRIM`] over it.
-    fn scrimmed(value: u8) -> Color {
-        let alpha = f32::from(SCRIM.alpha()) / 255.0;
-        let mix = |over: u8| (f32::from(value) * (1.0 - alpha) + f32::from(over) * alpha) as u8;
+    /// `over` composited onto an opaque `under`.
+    fn composite(under: Color, over: Color) -> Color {
+        let alpha = f32::from(over.alpha()) / 255.0;
+        let mix = |u: u8, o: u8| (f32::from(u) * (1.0 - alpha) + f32::from(o) * alpha) as u8;
         Color::from_argb(
             0xFF00_0000
-                | (u32::from(mix(SCRIM.red())) << 16)
-                | (u32::from(mix(SCRIM.green())) << 8)
-                | u32::from(mix(SCRIM.blue())),
+                | (u32::from(mix(under.red(), over.red())) << 16)
+                | (u32::from(mix(under.green(), over.green())) << 8)
+                | u32::from(mix(under.blue(), over.blue())),
+        )
+    }
+
+    /// A wallpaper of solid `value`, with [`SCRIM`] over it.
+    fn scrimmed(value: u8) -> Color {
+        composite(
+            Color::from_argb(0xFF00_0000 | (u32::from(value) * 0x01_0101)),
+            SCRIM,
         )
     }
 
@@ -243,6 +313,30 @@ mod tests {
                 "the dim text on a scrimmed 0x{value:02X} wallpaper is {secondary:.2}:1"
             );
         }
+    }
+
+    /// The material is the scrimmed wallpaper blurred and tinted, and the
+    /// password dots and the avatar's initial sit on it. Blurring does not
+    /// change the range -- a blur of values between black and white is
+    /// between black and white -- so the two extremes bound every photograph.
+    #[test]
+    fn text_stays_readable_on_the_material() {
+        for value in [0x00, 0x80, 0xFF] {
+            let background = composite(scrimmed(value), MATERIAL);
+            let primary = contrast(TEXT, background);
+            assert!(
+                primary >= 4.5,
+                "TEXT on the material over a 0x{value:02X} wallpaper is {primary:.2}:1"
+            );
+            let secondary = contrast(TEXT_DIM_ON_WALLPAPER, background);
+            assert!(
+                secondary >= 3.0,
+                "the placeholder on the material over 0x{value:02X} is {secondary:.2}:1"
+            );
+        }
+        // ...and on the plain backdrop, where there is no wallpaper to blur.
+        let plain = composite(BACKDROP, MATERIAL);
+        assert!(contrast(TEXT, plain) >= 4.5);
     }
 
     /// The wallpaper dim has to still read as secondary, or the date competes

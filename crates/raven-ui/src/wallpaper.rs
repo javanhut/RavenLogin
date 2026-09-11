@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::canvas::Backdrop;
 use crate::theme;
 
 /// The largest file this will read, before any decoding.
@@ -140,12 +141,58 @@ struct Image {
     pixels: Vec<u8>,
 }
 
-/// The image scaled to one particular surface, with the scrim already in it.
-struct Prepared {
+/// The image scaled to one particular surface, with the scrim already in it,
+/// and a small blurred copy for the materials to see through to.
+pub struct Prepared {
     width: i32,
     height: i32,
     pixels: Vec<u8>,
+    blur_width: i32,
+    blur_height: i32,
+    blurred: Vec<u8>,
 }
+
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("blur", &(self.blur_width, self.blur_height))
+            .finish()
+    }
+}
+
+impl Prepared {
+    /// The frame, ready to blit.
+    #[must_use]
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// The same picture, blurred, for [`Canvas::material`].
+    #[must_use]
+    pub fn backdrop(&self) -> Backdrop<'_> {
+        Backdrop {
+            pixels: &self.blurred,
+            width: self.blur_width,
+            height: self.blur_height,
+        }
+    }
+}
+
+/// How much smaller the blurred copy is than the frame, per side.
+///
+/// Eight: a 4K frame's blurred copy is 480x270, small enough that blurring
+/// it three times costs less than scaling the frame did, and each of its
+/// pixels stands for an 8x8 block -- which is already most of the blur.
+const BLUR_DOWNSCALE: usize = 8;
+
+/// The box blur's radius in blurred-copy pixels, applied three times.
+///
+/// Three passes of a box are a close approximation to a Gaussian, and this
+/// radius at this downscale comes to about a 28-pixel sigma on the frame:
+/// enough that nothing behind the field is a shape any more, only colour.
+const BLUR_RADIUS: usize = 3;
 
 impl Wallpaper {
     /// Read and decode the file at `path`.
@@ -204,11 +251,13 @@ impl Wallpaper {
         }
     }
 
-    /// The image scaled to cover `width` x `height`, ready to blit.
+    /// The image scaled to cover `width` x `height`, ready to blit, with its
+    /// blurred copy.
     ///
-    /// Cached: the scale is redone only when the surface size changes, which
-    /// happens at the first configure and then essentially never.
-    pub fn prepared(&mut self, width: i32, height: i32) -> &[u8] {
+    /// Cached: the scale and the blur are redone only when the surface size
+    /// changes, which happens at the first configure and then essentially
+    /// never.
+    pub fn prepared(&mut self, width: i32, height: i32) -> &Prepared {
         let stale = self
             .prepared
             .as_ref()
@@ -216,15 +265,107 @@ impl Wallpaper {
 
         if stale {
             tracing::debug!(width, height, "scaling the wallpaper");
+            let pixels = self.image.scaled_to_cover(width, height);
+            let (blurred, blur_width, blur_height) = blur(&pixels, width, height);
             self.prepared = Some(Prepared {
                 width,
                 height,
-                pixels: self.image.scaled_to_cover(width, height),
+                pixels,
+                blur_width,
+                blur_height,
+                blurred,
             });
         }
 
         // Set immediately above if it was stale, so this cannot be `None`.
-        self.prepared.as_ref().map_or(&[], |p| &p.pixels)
+        self.prepared
+            .as_ref()
+            .expect("prepared was set just above if it was stale")
+    }
+}
+
+/// A small, heavily blurred copy of a frame: `(pixels, width, height)`.
+///
+/// Downscale by [`BLUR_DOWNSCALE`] with a box average, then three separable
+/// box blurs of [`BLUR_RADIUS`]. Everything is done on the small copy, so the
+/// cost is a few hundred thousand pixels three times over rather than a few
+/// million.
+fn blur(pixels: &[u8], width: i32, height: i32) -> (Vec<u8>, i32, i32) {
+    let (w, h) = (width.max(1) as usize, height.max(1) as usize);
+    let bw = w.div_ceil(BLUR_DOWNSCALE).max(1);
+    let bh = h.div_ceil(BLUR_DOWNSCALE).max(1);
+
+    // Downscale: each small pixel is the mean of its block, in `f32` for the
+    // blur passes to work on without rounding three times.
+    let mut small = vec![0.0f32; bw * bh * 3];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
+            for y in by * BLUR_DOWNSCALE..((by + 1) * BLUR_DOWNSCALE).min(h) {
+                for x in bx * BLUR_DOWNSCALE..((bx + 1) * BLUR_DOWNSCALE).min(w) {
+                    let i = (y * w + x) * 4;
+                    if let Some(p) = pixels.get(i..i + 3) {
+                        sum[0] += f32::from(p[0]);
+                        sum[1] += f32::from(p[1]);
+                        sum[2] += f32::from(p[2]);
+                        count += 1.0;
+                    }
+                }
+            }
+            let o = (by * bw + bx) * 3;
+            if count > 0.0 {
+                small[o] = sum[0] / count;
+                small[o + 1] = sum[1] / count;
+                small[o + 2] = sum[2] / count;
+            }
+        }
+    }
+
+    // Three passes of a separable box blur, edges clamped so the border does
+    // not darken toward nothing.
+    let mut scratch = vec![0.0f32; bw * bh * 3];
+    for _ in 0..3 {
+        box_pass(&small, &mut scratch, bw, bh, true);
+        box_pass(&scratch, &mut small, bw, bh, false);
+    }
+
+    let mut out = vec![0u8; bw * bh * 4];
+    for i in 0..bw * bh {
+        out[i * 4] = small[i * 3].round() as u8;
+        out[i * 4 + 1] = small[i * 3 + 1].round() as u8;
+        out[i * 4 + 2] = small[i * 3 + 2].round() as u8;
+        out[i * 4 + 3] = 0xFF;
+    }
+    (out, bw as i32, bh as i32)
+}
+
+/// One box-blur pass, along rows if `horizontal` and down columns otherwise.
+fn box_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, horizontal: bool) {
+    let r = BLUR_RADIUS as isize;
+    let (outer, inner) = if horizontal { (h, w) } else { (w, h) };
+    let index = |o: usize, i: usize| -> usize {
+        if horizontal {
+            (o * w + i) * 3
+        } else {
+            (i * w + o) * 3
+        }
+    };
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut sum = [0.0f32; 3];
+            for k in -r..=r {
+                let j = (i as isize + k).clamp(0, inner as isize - 1) as usize;
+                let s = index(o, j);
+                sum[0] += src[s];
+                sum[1] += src[s + 1];
+                sum[2] += src[s + 2];
+            }
+            let d = index(o, i);
+            let n = (2 * r + 1) as f32;
+            dst[d] = sum[0] / n;
+            dst[d + 1] = sum[1] / n;
+            dst[d + 2] = sum[2] / n;
+        }
     }
 }
 
@@ -564,7 +705,7 @@ mod tests {
     #[test]
     fn scaling_leaves_every_pixel_opaque() {
         let out = checker().scaled_to_cover(16, 9);
-        assert!(out.chunks_exact(4).all(|p| p[3] == 0xFF));
+        assert!(out.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
     }
 
     /// The scrim is the only thing between a bright photograph and unreadable
@@ -606,9 +747,47 @@ mod tests {
             image: checker(),
             prepared: None,
         };
-        assert_eq!(wallpaper.prepared(8, 8).len(), 8 * 8 * 4);
-        assert_eq!(wallpaper.prepared(8, 8).len(), 8 * 8 * 4);
-        assert_eq!(wallpaper.prepared(16, 4).len(), 16 * 4 * 4);
+        assert_eq!(wallpaper.prepared(8, 8).pixels().len(), 8 * 8 * 4);
+        assert_eq!(wallpaper.prepared(8, 8).pixels().len(), 8 * 8 * 4);
+        assert_eq!(wallpaper.prepared(16, 4).pixels().len(), 16 * 4 * 4);
+    }
+
+    /// The blurred copy covers the frame at a fraction of its size, is
+    /// opaque, and is a blur: a hard edge in the frame is a ramp in it.
+    #[test]
+    fn the_blur_is_small_opaque_and_soft() {
+        // A frame whose left half is black and right half white.
+        let (w, h) = (128, 32);
+        let mut frame = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in w / 2..w {
+                let i = (y * w + x) * 4;
+                frame[i..i + 4].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+            }
+        }
+        let (blurred, bw, bh) = blur(&frame, w as i32, h as i32);
+        assert_eq!((bw, bh), (16, 4));
+        assert_eq!(blurred.len(), 16 * 4 * 4);
+        assert!(blurred.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
+
+        let row: Vec<u8> = (0..16).map(|x| blurred[(2 * 16 + x) * 4]).collect();
+        assert!(row[0] < 0x10, "the far left stays dark: {row:?}");
+        assert!(row[15] > 0xEF, "the far right stays light: {row:?}");
+        assert!(
+            row[7] > 0x30 && row[7] < 0xCF,
+            "the edge is a ramp, not a step: {row:?}"
+        );
+        assert!(row.windows(2).all(|p| p[0] <= p[1]), "monotonic: {row:?}");
+    }
+
+    #[test]
+    fn blurring_survives_tiny_frames() {
+        for (w, h) in [(1, 1), (3, 9), (9, 3)] {
+            let frame = vec![0x80u8; (w * h * 4) as usize];
+            let (blurred, bw, bh) = blur(&frame, w, h);
+            assert_eq!(blurred.len(), (bw * bh * 4) as usize);
+            assert!(bw >= 1 && bh >= 1);
+        }
     }
 
     #[test]

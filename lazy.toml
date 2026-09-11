@@ -26,7 +26,9 @@ alias = ["check-unsafe"]
 
 [commands.preview]
 # imlazy has no variables, so the default comes from the shell: override it
-# with `state=denied imlazy preview`. One of empty, typing, denied, caps.
+# with `state=denied imlazy preview`. One of empty, typing, denied, caps,
+# busy, throttled, unlocking, arriving. Add `--lock` or `--at MS` by running
+# the cargo command by hand; see README "Seeing it without booting".
 desc = "Render the login screen to /tmp/raven-login.png without booting"
 run = [
     "cargo run -q -p raven-greeter -- --preview /tmp/raven-login.png 1920x1080 ${state:-empty}",

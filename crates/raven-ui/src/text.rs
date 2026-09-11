@@ -61,6 +61,49 @@ pub enum Align {
     Right,
 }
 
+/// How a run of text is set: its size, weight, and tracking.
+///
+/// Tracking is in ems and belongs to the size, which is why it travels with
+/// it rather than being a renderer-wide setting. Large text reads too loose
+/// at the font's own spacing and wants tightening; small text wants a touch
+/// more room. One value for both is wrong at one end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStyle {
+    /// Font size in pixels.
+    pub size: f32,
+    pub weight: Weight,
+    /// Letter spacing as a fraction of the size: `-0.02` tightens, `0.01`
+    /// loosens.
+    pub tracking: f32,
+}
+
+impl TextStyle {
+    #[must_use]
+    pub const fn new(size: f32, weight: Weight) -> Self {
+        Self {
+            size,
+            weight,
+            tracking: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub const fn tracked(mut self, tracking: f32) -> Self {
+        self.tracking = tracking;
+        self
+    }
+
+    /// The same style at `factor` times the size. Tracking is in ems, so it
+    /// scales with the size on its own.
+    #[must_use]
+    pub fn scaled(self, factor: f32) -> Self {
+        Self {
+            size: self.size * factor,
+            ..self
+        }
+    }
+}
+
 /// A shaped, rasterized run of text.
 #[derive(Debug)]
 pub struct TextRenderer {
@@ -121,39 +164,48 @@ impl TextRenderer {
         }
     }
 
-    fn attrs(&self, weight: Weight) -> Attrs<'_> {
+    fn attrs(&self, style: TextStyle) -> Attrs<'_> {
         let mut attrs = Attrs::new();
         attrs.family = match &self.family {
             Some(name) => Family::Name(name),
             None => Family::Monospace,
         };
-        attrs.weight = weight;
+        attrs.weight = style.weight;
+        if style.tracking != 0.0 {
+            // cosmic-text takes tracking in ems, and so does `TextStyle`.
+            attrs = attrs.letter_spacing(style.tracking);
+        }
         attrs
     }
 
     /// Lay one line out and hand back the buffer plus its measured width.
-    fn shape(&mut self, text: &str, size: f32, weight: Weight) -> (Buffer, f32) {
+    fn shape(&mut self, text: &str, style: TextStyle) -> (Buffer, f32) {
+        let size = style.size.max(1.0);
         // Line height 1.25x is the usual readable ratio, and every string this
         // renders is a single line, so it only affects vertical centring.
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.25));
         // No wrapping: everything here is a label that should be measured and
         // placed, not flowed into a column.
         buffer.set_size(None, None);
-        let attrs = self.attrs(weight);
+        let attrs = self.attrs(style);
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
+        // Tracking is added after every glyph, including the last, so the
+        // measured line is one tracking wider than the ink. Taking it off
+        // keeps centred text actually centred.
+        let trailing = style.tracking * size;
         let width = buffer
             .layout_runs()
             .map(|run| run.line_w)
             .fold(0.0_f32, f32::max);
-        (buffer, width)
+        (buffer, (width - trailing).max(0.0))
     }
 
     /// How wide `text` would be. Used to centre things and to size the field
     /// around its contents.
-    pub fn measure(&mut self, text: &str, size: f32, weight: Weight) -> f32 {
-        self.shape(text, size, weight).1
+    pub fn measure(&mut self, text: &str, style: TextStyle) -> f32 {
+        self.shape(text, style).1
     }
 
     /// Draw one line of text.
@@ -168,15 +220,14 @@ impl TextRenderer {
         text: &str,
         x: f32,
         y: f32,
-        size: f32,
-        weight: Weight,
+        style: TextStyle,
         color: Color,
         align: Align,
     ) {
-        if text.is_empty() {
+        if text.is_empty() || color.alpha() == 0 {
             return;
         }
-        let (mut buffer, width) = self.shape(text, size, weight);
+        let (mut buffer, width) = self.shape(text, style);
 
         let left = match align {
             Align::Left => x,
@@ -233,18 +284,32 @@ mod tests {
     fn text_measures_and_draws() {
         let mut renderer = TextRenderer::new();
 
+        let body = TextStyle::new(16.0, FontWeight::NORMAL);
+
         // Measuring
-        let empty = renderer.measure("", 16.0, FontWeight::NORMAL);
+        let empty = renderer.measure("", body);
         assert_eq!(empty, 0.0, "an empty string has no width");
 
-        let short = renderer.measure("R", 16.0, FontWeight::NORMAL);
-        let long = renderer.measure("Raven Linux", 16.0, FontWeight::NORMAL);
+        let short = renderer.measure("R", body);
+        let long = renderer.measure("Raven Linux", body);
         assert!(short > 0.0, "a glyph should have a width");
         assert!(long > short, "a longer string should be wider");
 
-        let big = renderer.measure("Raven", 32.0, FontWeight::NORMAL);
-        let small = renderer.measure("Raven", 16.0, FontWeight::NORMAL);
+        let big = renderer.measure("Raven", body.scaled(2.0));
+        let small = renderer.measure("Raven", body);
         assert!(big > small, "larger text should be wider");
+
+        // Tracking: tighter is narrower, looser is wider, and the trailing
+        // spacing is not counted.
+        let tight = renderer.measure("Raven", body.tracked(-0.05));
+        let loose = renderer.measure("Raven", body.tracked(0.05));
+        assert!(tight < small, "negative tracking should narrow the line");
+        assert!(loose > small, "positive tracking should widen the line");
+        let one = renderer.measure("R", body.tracked(0.5));
+        assert!(
+            (one - short).abs() < 0.5,
+            "one glyph is the same width at any tracking: {one} vs {short}"
+        );
 
         // Drawing
         let mut data = vec![0u8; 200 * 60 * 4];
@@ -255,14 +320,13 @@ mod tests {
                 "Raven",
                 10.0,
                 10.0,
-                24.0,
-                FontWeight::BOLD,
+                TextStyle::new(24.0, FontWeight::BOLD),
                 theme::TEXT,
                 Align::Left,
             );
         }
         assert!(
-            data.chunks_exact(4).any(|p| p[3] != 0),
+            data.as_chunks::<4>().0.iter().any(|p| p[3] != 0),
             "drawing text should have marked some pixels"
         );
     }
@@ -317,8 +381,7 @@ mod tests {
                 "a string much wider than this canvas",
                 x,
                 y,
-                24.0,
-                FontWeight::NORMAL,
+                TextStyle::new(24.0, FontWeight::NORMAL),
                 theme::TEXT,
                 Align::Left,
             );

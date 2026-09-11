@@ -14,11 +14,13 @@
 //! |---|---|
 //! | [`canvas`] | An ARGB buffer, and the shapes that go into it |
 //! | [`text`] | Glyph rasterisation and layout, over `cosmic-text` |
+//! | [`motion`] | Springs: how every value on the screen moves |
 //! | [`theme`] | Every colour and metric, in one place |
 //! | [`wallpaper`] | Decoding and scaling the image behind it all |
 //! | [`screen`] | The password screen itself: state, keys, and drawing |
 
 pub mod canvas;
+pub mod motion;
 pub mod screen;
 pub mod text;
 pub mod theme;

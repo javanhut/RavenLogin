@@ -122,6 +122,28 @@ which is what huginn does. It is more code, one more dependency, and saves ten
 wakeups a second on a process that exists for the thirty seconds somebody
 spends typing a password.
 
+## Why the lock screen has an event loop and the greeter does not
+
+Both are frame-callback driven: every frame asks for the next, the compositor
+paces them, and every spring on the screen is stepped by the interval between
+one and the next. That needs nothing more than `blocking_dispatch`, and the
+greeter has nothing more.
+
+`raven-lock` has a `calloop` loop with one timer in it, for one path. When the
+password is accepted, the padlock opens and the screen lifts away before the
+compositor is told to reveal the session -- a few hundred milliseconds of
+frames, so that what is seen is the lock letting go and not a cut. Those
+frames come from the compositor. A compositor that has turned the panel off,
+or that has stopped sending frame callbacks for any reason, would leave the
+session verified and never revealed, which is the one failure a lock screen
+must never have. So the unlock goes out when the screen reports it has
+finished *or* when 900 ms have passed, whichever comes first, and the timer
+is what makes the second half of that true without a frame to run it in.
+
+The screen cannot be tricked into the first half. `is_dismissed` is true only
+for a screen that was told to dismiss, however long an undismissed one is
+drawn; there is a test for exactly that.
+
 ## Why a failed login screen is retried, not fatal
 
 `ravend` exits for exactly one class of problem: a precondition it cannot

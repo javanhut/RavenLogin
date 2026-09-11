@@ -20,6 +20,49 @@
 
 use crate::theme::Color;
 
+/// A low-resolution picture of what is behind the whole canvas, for
+/// [`Canvas::material`] to see through to.
+///
+/// It covers the canvas edge to edge at whatever resolution it has; the
+/// canvas stretches it. Low resolution is the point: it is already blurred,
+/// so it has nothing sharp to lose, and sampling a picture a sixty-fourth the
+/// size is what makes a see-through surface cost about what an opaque one
+/// does.
+#[derive(Debug, Clone, Copy)]
+pub struct Backdrop<'a> {
+    /// `[B, G, R, A]` per pixel, `width * height` of them.
+    pub pixels: &'a [u8],
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Backdrop<'_> {
+    /// Bilinear sample at a point given in `0.0..=1.0` of the picture's
+    /// extent, as `(B, G, R)`.
+    fn sample(&self, u: f32, v: f32) -> (f32, f32, f32) {
+        let (w, h) = (self.width.max(1) as usize, self.height.max(1) as usize);
+        if self.pixels.len() < w * h * 4 {
+            return (0.0, 0.0, 0.0);
+        }
+        let fx = (u * w as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+        let fy = (v * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+        let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+
+        let at = |x: usize, y: usize, c: usize| f32::from(self.pixels[(y * w + x) * 4 + c]);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let channel = |c: usize| {
+            lerp(
+                lerp(at(x0, y0, c), at(x1, y0, c), tx),
+                lerp(at(x0, y1, c), at(x1, y1, c), tx),
+                ty,
+            )
+        };
+        (channel(0), channel(1), channel(2))
+    }
+}
+
 /// A borrowed `wl_shm` buffer, with drawing operations on top.
 #[derive(Debug)]
 pub struct Canvas<'a> {
@@ -211,6 +254,112 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// A translucent surface: the blurred backdrop, tinted, inside a rounded
+    /// rectangle.
+    ///
+    /// This is what makes the field and the avatar read as material rather
+    /// than as cards. The wallpaper behind them is visible as colour and
+    /// nothing else, so they belong to the picture, and the tint keeps what
+    /// is drawn on them readable whatever the picture is.
+    ///
+    /// With no backdrop -- the plain gradient, or a wallpaper that failed --
+    /// the tint is drawn over whatever is already there, which on the flat
+    /// backdrop is indistinguishable from the same surface done properly.
+    pub fn material(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        backdrop: Option<Backdrop<'_>>,
+        tint: Color,
+    ) {
+        let Some(backdrop) = backdrop else {
+            self.rounded_rect(rect, radius, tint);
+            return;
+        };
+
+        let radius = radius.min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+        let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (hx, hy) = (rect.width / 2.0 - radius, rect.height / 2.0 - radius);
+        let (w, h) = (self.width.max(1) as f32, self.height.max(1) as f32);
+        let tint_alpha = f32::from(tint.alpha()) / 255.0;
+
+        for y in bounds(rect.y - 1.0, rect.y + rect.height + 1.0, self.height) {
+            for x in bounds(rect.x - 1.0, rect.x + rect.width + 1.0, self.width) {
+                let px = x as f32 + 0.5 - cx;
+                let py = y as f32 + 0.5 - cy;
+                let dx = px.abs() - hx;
+                let dy = py.abs() - hy;
+                let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
+                let inside = dx.max(dy).min(0.0);
+                let coverage = coverage_of(outside + inside - radius);
+                if coverage <= 0.0 {
+                    continue;
+                }
+
+                // The blurred backdrop with the tint already over it, as one
+                // opaque colour, then that colour at the edge's coverage.
+                let (b, g, r) = backdrop.sample((x as f32 + 0.5) / w, (y as f32 + 0.5) / h);
+                let over = |under: f32, tint: u8| -> u32 {
+                    (under + (f32::from(tint) - under) * tint_alpha).round() as u32
+                };
+                let color = Color::from_argb(
+                    0xFF00_0000
+                        | (over(r, tint.red()) << 16)
+                        | (over(g, tint.green()) << 8)
+                        | over(b, tint.blue()),
+                );
+                self.blend(x, y, color, coverage);
+            }
+        }
+    }
+
+    /// A stroke along part of a circle, with round ends.
+    ///
+    /// `start` and `sweep` are in radians, clockwise on screen (y down) from
+    /// three o'clock. A sweep of `TAU` or more is a full ring.
+    ///
+    /// Round ends fall out of the distance field for free: a point outside
+    /// the arc's angular range measures its distance to the nearer end
+    /// point, and the stroke's half-width around that point is a cap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn arc(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        thickness: f32,
+        start: f32,
+        sweep: f32,
+        color: Color,
+    ) {
+        use std::f32::consts::TAU;
+        let half = thickness.max(0.1) / 2.0;
+        let sweep = sweep.clamp(0.0, TAU);
+        let (sin_s, cos_s) = start.sin_cos();
+        let (sin_e, cos_e) = (start + sweep).sin_cos();
+        let (ex0, ey0) = (cx + radius * cos_s, cy + radius * sin_s);
+        let (ex1, ey1) = (cx + radius * cos_e, cy + radius * sin_e);
+
+        let reach = radius + half + 1.0;
+        for y in bounds(cy - reach, cy + reach, self.height) {
+            for x in bounds(cx - reach, cx + reach, self.width) {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let (dx, dy) = (px - cx, py - cy);
+                let angle = (dy.atan2(dx) - start).rem_euclid(TAU);
+
+                let distance = if sweep >= TAU || angle <= sweep {
+                    ((dx * dx + dy * dy).sqrt() - radius).abs()
+                } else {
+                    let to_start = ((px - ex0).powi(2) + (py - ey0).powi(2)).sqrt();
+                    let to_end = ((px - ex1).powi(2) + (py - ey1).powi(2)).sqrt();
+                    to_start.min(to_end)
+                };
+                self.blend(x, y, color, coverage_of(distance - half));
+            }
+        }
+    }
+
     /// A filled circle.
     pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
         self.circle_impl(cx, cy, radius, color, None);
@@ -385,6 +534,64 @@ mod tests {
         // The centre is filled and the corners are not.
         assert_eq!(pixel(&data, 60, 30, 20).3, 0xFF);
         assert_eq!(pixel(&data, 60, 11, 11).3, 0x00);
+    }
+
+    /// An arc is the part of the ring inside its sweep and nothing outside it.
+    #[test]
+    fn an_arc_covers_its_sweep_and_not_the_rest() {
+        use std::f32::consts::PI;
+        let mut data = canvas(60, 60);
+        let mut c = Canvas::new(&mut data, 60, 60);
+        // The top half: from nine o'clock, clockwise on screen through twelve
+        // to three. On screen that is angles PI..TAU.
+        c.arc(30.0, 30.0, 20.0, 3.0, PI, PI, theme::ACCENT);
+
+        assert!(
+            pixel(&data, 60, 30, 10).3 > 0x80,
+            "twelve o'clock is on the arc"
+        );
+        assert_eq!(pixel(&data, 60, 30, 50).3, 0x00, "six o'clock is not");
+        // The ends are rounded, so the cap extends a little past the end
+        // point rather than being cut flat.
+        assert!(pixel(&data, 60, 10, 31).3 > 0x00, "the cap at nine o'clock");
+    }
+
+    /// The material sees through to the backdrop: over a red backdrop it is
+    /// red-ish, and it stays inside its shape.
+    #[test]
+    fn material_shows_the_backdrop_through_the_tint() {
+        let red = [0x00, 0x00, 0xFF, 0xFF].repeat(4);
+        let backdrop = Backdrop {
+            pixels: &red,
+            width: 2,
+            height: 2,
+        };
+        let mut data = canvas(40, 40);
+        let mut c = Canvas::new(&mut data, 40, 40);
+        c.material(
+            Rect::new(10.0, 10.0, 20.0, 20.0),
+            4.0,
+            Some(backdrop),
+            theme::SURFACE.with_alpha(0x80),
+        );
+        let (r, _, b, a) = pixel(&data, 40, 20, 20);
+        assert_eq!(a, 0xFF);
+        assert!(
+            r > b,
+            "the red backdrop should show through, got r={r} b={b}"
+        );
+        assert!(r < 0xFF, "but the tint should darken it");
+        assert_eq!(pixel(&data, 40, 2, 2).3, 0x00, "outside is untouched");
+    }
+
+    /// Without a backdrop the material is just its tint.
+    #[test]
+    fn material_without_a_backdrop_is_the_tint() {
+        let mut data = canvas(40, 40);
+        let mut c = Canvas::new(&mut data, 40, 40);
+        c.material(Rect::new(10.0, 10.0, 20.0, 20.0), 4.0, None, theme::ACCENT);
+        let (r, g, b, _) = pixel(&data, 40, 20, 20);
+        assert_eq!((r, g, b), (0x7A, 0xA2, 0xF7));
     }
 
     #[test]

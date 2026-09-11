@@ -38,7 +38,36 @@ avatar a few pixels off, the hint reworded, a slightly different blue — then
 what it teaches is that near-misses are normal. Making them the same code is
 the only way to guarantee they cannot drift.
 
-What differs is underneath. The greeter draws an `wlr-layer-shell` overlay;
+### What it looks like, and how it moves
+
+The screen is two blocks. A padlock, the date and a large clock sit high,
+where the eye lands first; the avatar, the name and the password field sit
+below the centre, where the hands are. The field and the avatar are not
+opaque cards: they are the wallpaper behind them, blurred until it is only
+colour, with a tint over it -- so they belong to the picture rather than
+sitting on it, and their colour follows the wallpaper from one machine to the
+next. Type is set with tracking that belongs to its size, tighter as it gets
+larger. The desktop's accent colour appears in exactly two places, the caret
+and the ring around the field, and both mean the same thing: this is where
+typing goes.
+
+Everything that changes on it changes on a spring, from wherever it currently
+is. A dot pops in on the key press; the row re-centres around it; a
+backspace pops it out again. A wrong password shoves the field sideways and
+it rings back to rest, the border turning to the error colour as it does. An
+attempt in flight dims the field and spins a ring beside it. The right
+password opens the padlock, and the screen lifts away along the same path it
+settled in on -- and only then is the session revealed, so what you see is
+the lock letting go rather than a cut. Nothing waits for an animation: a key
+pressed mid-motion bends the motion rather than restarting it, and no spring
+is ever consulted to decide what a key does.
+
+`RAVEN_REDUCE_MOTION=1` in the environment keeps the feedback and drops the
+movement: colours and opacity still change, nothing shakes, pops or lifts.
+
+### What differs
+
+The greeter draws an `wlr-layer-shell` overlay;
 `raven-lock` is an `ext-session-lock-v1` client, because there *is* a session
 behind it and the protocol's guarantee — if the locking client dies, the
 compositor keeps the screen locked rather than revealing the desktop — is the
@@ -149,13 +178,21 @@ a person and their own machine.
 ## Seeing it without booting
 
 ```
-cargo run -p raven-greeter -- --preview OUT.png [WIDTHxHEIGHT] [empty|typing|denied|caps]
-                                      [--wallpaper IMAGE.png] [--force]
+cargo run -p raven-greeter -- --preview OUT.png [WIDTHxHEIGHT] [STATE]
+                                      [--lock] [--at MS] [--wallpaper IMAGE.png] [--force]
 ```
 
 Renders one frame to a PNG, on any host, with no compositor and no `ravend`.
 It calls the same `draw` the compositor drives, so it is not a mock — a change
 that breaks the layout breaks the preview the same way.
+
+`STATE` is one of `empty`, `typing`, `denied`, `caps`, `busy`, `throttled`,
+`unlocking` or `arriving`. `--lock` renders the lock screen rather than the
+login screen. `--at MS` renders the frame that many milliseconds into the
+state's motion, with everything before it already settled -- `denied --at 60`
+is the field mid-shake, `unlocking --at 250` is the padlock open and the
+screen half gone -- which is how the motion gets reviewed frame by frame
+rather than by guessing at it from a description.
 
 `OUT.png` is the file to **write**. To see the screen drawn on top of an image,
 that is `--wallpaper`, which is a separate argument on purpose — and an

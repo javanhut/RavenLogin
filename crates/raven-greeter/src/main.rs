@@ -176,6 +176,9 @@ fn run() -> Result<()> {
         screen: {
             let mut screen = PasswordScreen::new(users);
             screen.set_wallpaper(wallpaper);
+            screen.set_reduced_motion(
+                std::env::var_os("RAVEN_REDUCE_MOTION").is_some_and(|v| !v.is_empty() && v != "0"),
+            );
             screen
         },
         text: TextRenderer::new(),
@@ -293,6 +296,10 @@ impl Greeter {
                     text: "Welcome back.".to_string(),
                     kind: MessageKind::Success,
                 }));
+                // Leave the way the lock screen leaves. The daemon stops
+                // this process when the session is up; until then the frames
+                // keep coming and the screen lifts away under them.
+                self.screen.dismiss();
             }
             Ok(Attempt::Denied {
                 message,
