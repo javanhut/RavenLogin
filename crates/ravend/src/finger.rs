@@ -114,7 +114,12 @@ pub(crate) fn password_succeeded(account: &str) {
 /// It serves one connection at a time, so a screen holding the reader makes
 /// every other caller wait. A settings panel asking for status should be told
 /// the reader is busy, not hang.
-const QUICK: Duration = Duration::from_secs(3);
+///
+/// Longer than one sensor command can take -- `raven-fprintd` gives the write
+/// and the read five seconds each -- so that a daemon bringing a slow sensor up
+/// is waited for rather than reported busy on every single request. Each
+/// connection here has its own thread, so the wait holds up nobody else.
+const QUICK: Duration = Duration::from_secs(12);
 
 fn connect_quick() -> std::io::Result<Option<Sensor>> {
     let sensor = Sensor::connect()?;
@@ -156,6 +161,10 @@ fn busy_or_broken(e: &std::io::Error) -> Response {
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
     ) {
         "The fingerprint reader is busy. Try again in a moment."
+    } else if e.kind() == std::io::ErrorKind::Other {
+        // `raven-fprintd` answered, with an `error` line: the daemon is fine
+        // and the sensor is what failed.
+        "The fingerprint reader is not responding. Try again in a moment."
     } else {
         "The fingerprint service is not answering."
     };
