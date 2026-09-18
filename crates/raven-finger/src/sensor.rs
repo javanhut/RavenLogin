@@ -178,8 +178,27 @@ impl Sensor {
     }
 
     /// Remove one of `account`'s fingers.
+    ///
+    /// Not every reader can. A sensor with no per-finger delete answers with
+    /// an error saying so, which is passed back as it was written: the caller
+    /// has to tell somebody why their fingerprint is still there, and "could
+    /// not remove it" does not.
     pub fn forget(&mut self, account: &str, finger: Finger) -> std::io::Result<()> {
         self.send(&format!("forget {account} {}", finger.as_str()))?;
+        let line = self.expect_line()?;
+        match line.strip_prefix("error") {
+            Some(why) => Err(std::io::Error::other(why.trim().to_string())),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove every finger on the sensor, whoever enrolled it.
+    ///
+    /// Everybody's, not just `account`'s: the sensor stores fingers and not
+    /// accounts, and on a reader without a per-finger delete this is the only
+    /// removal there is. Whatever offers it has to say so plainly first.
+    pub fn forget_all(&mut self) -> std::io::Result<()> {
+        self.send("forget-all")?;
         let line = self.expect_line()?;
         match line.strip_prefix("error") {
             Some(why) => Err(std::io::Error::other(why.trim().to_string())),

@@ -173,8 +173,19 @@ fn busy_or_broken(e: &std::io::Error) -> Response {
     }
 }
 
-/// Forget one of `account`'s fingers, or all of them. Never anybody else's:
-/// `raven-fprintd`'s own `forget-all` is not used, because it would be.
+/// Forget one of `account`'s fingers, or clear the sensor entirely.
+///
+/// `Some(finger)` is this account's and only this account's. `None` is the
+/// whole sensor, everybody's fingers included, which is not a thing to do
+/// quietly: it exists because a reader may have no way to remove one finger at
+/// a time -- the Elan `0c00` refuses every per-finger delete it is sent and
+/// honours only "clear everything" -- and on such a reader it is the only
+/// removal there is. Whatever asks for it is responsible for saying so first.
+///
+/// This used to be one finger at a time in both cases, on the reasoning that
+/// `raven-fprintd`'s `forget-all` would take other people's. It would, and it
+/// still does; what changed is that the alternative turned out not to exist on
+/// the hardware in hand.
 pub(crate) fn forget(account: &str, finger: Option<Finger>) -> Response {
     let mut sensor = match connect_quick() {
         Ok(Some(sensor)) => sensor,
@@ -185,21 +196,34 @@ pub(crate) fn forget(account: &str, finger: Option<Finger>) -> Response {
         }
         Err(e) => return busy_or_broken(&e),
     };
-    let targets = match finger {
-        Some(finger) => vec![finger],
-        None => match sensor.fingers_of(account) {
-            Ok(all) => all,
-            Err(e) => return busy_or_broken(&e),
-        },
-    };
-    for finger in targets {
-        if let Err(e) = sensor.forget(account, finger) {
-            tracing::warn!(user = %account, finger = finger.as_str(), "cannot forget: {e}");
-            return Response::Failed {
-                message: format!("Could not remove the {}.", finger.label().to_lowercase()),
-            };
+    match finger {
+        Some(finger) => {
+            if let Err(e) = sensor.forget(account, finger) {
+                tracing::warn!(user = %account, finger = finger.as_str(), "cannot forget: {e}");
+                // The daemon's own words, not a summary of them. A reader that
+                // cannot remove one finger says which removal it can do, and
+                // that sentence is the only thing that tells somebody what to
+                // try instead.
+                return Response::Failed {
+                    message: format!("Could not remove the {}. {e}", finger.label().to_lowercase()),
+                };
+            }
+            tracing::info!(user = %account, finger = finger.as_str(), "forgot a finger");
         }
-        tracing::info!(user = %account, finger = finger.as_str(), "forgot a finger");
+        // Everybody's fingers, in one command, because a reader without a
+        // per-finger delete cannot do it any other way -- and one that has one
+        // still ends up here only when somebody asked for the lot. What this
+        // costs other accounts is said at the point somebody is asked to
+        // confirm it, which is the settings page and not here.
+        None => {
+            if let Err(e) = sensor.forget_all() {
+                tracing::warn!(user = %account, "cannot clear the sensor: {e}");
+                return Response::Failed {
+                    message: format!("Could not remove the fingerprints. {e}"),
+                };
+            }
+            tracing::info!(user = %account, "cleared every finger on the sensor");
+        }
     }
     // With nothing left to present, every switch is off. Leaving them on would
     // mean re-enrolling one finger quietly brought back fingerprint sudo that
