@@ -45,6 +45,7 @@
 //! `blocking_dispatch`.
 
 mod client;
+mod desktop_config;
 mod finger;
 
 use std::time::{Duration, Instant};
@@ -122,17 +123,15 @@ fn run() -> Result<()> {
         .context("ravend will not say whose session this is")?;
     tracing::info!(user = %user.name, "locking");
 
-    // The same picture the desktop is drawing. Read straight from where the
-    // machine keeps it rather than asked for over the socket: the verify socket
-    // deliberately answers nothing but the one question, and this is a fixed
-    // path being read by an unprivileged process that can read it anyway.
-    let wallpaper = wallpaper::installed().and_then(|path| match Wallpaper::load(&path) {
-        Ok(wallpaper) => Some(wallpaper),
-        Err(e) => {
-            tracing::warn!("ignoring the wallpaper: {e:#}");
-            None
-        }
-    });
+    // The same picture the desktop is drawing. RavenSettingsUI puts a user's
+    // choice in desktop.toml; when there is none (or it cannot be loaded), use
+    // the machine-wide picture. The verify socket deliberately answers
+    // nothing but authentication questions, and both paths are readable by
+    // the account whose session this process belongs to.
+    let wallpaper = desktop_config::wallpaper()
+        .filter(|path| path.is_file())
+        .and_then(load_wallpaper)
+        .or_else(|| wallpaper::installed().and_then(load_wallpaper));
 
     let conn = Connection::connect_to_env()
         .context("cannot connect to the Wayland display; is WAYLAND_DISPLAY set?")?;
@@ -208,6 +207,19 @@ fn run() -> Result<()> {
 
     tracing::info!("unlocked");
     Ok(())
+}
+
+fn load_wallpaper(path: std::path::PathBuf) -> Option<Wallpaper> {
+    match Wallpaper::load(&path) {
+        Ok(wallpaper) => {
+            tracing::info!(path = %path.display(), "wallpaper loaded");
+            Some(wallpaper)
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "ignoring the wallpaper: {e:#}");
+            None
+        }
+    }
 }
 
 /// One output's share of the lock.

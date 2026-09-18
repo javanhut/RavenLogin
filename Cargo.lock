@@ -582,7 +582,9 @@ dependencies = [
  "anyhow",
  "raven-greet-proto",
  "raven-ui",
+ "serde",
  "smithay-client-toolkit",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
