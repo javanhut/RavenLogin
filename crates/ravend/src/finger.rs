@@ -256,15 +256,43 @@ pub(crate) fn set_policy(account: &str, next: FingerPolicy) -> Response {
     status(account)
 }
 
-/// Hang up on `raven-fprintd` when the client hangs up on us.
+/// Whoever is on the far end of a watch, followed from another thread.
 ///
-/// Returns the flag that says the client went first, which is what tells a
-/// cancelled watch from a daemon that died under one.
-fn follow_client(client: &UnixStream, sensor: &Sensor) -> std::io::Result<Arc<AtomicBool>> {
+/// Set up once per watch, before any sensor exists, because a watch can now
+/// spend a while waiting for the reader to come back -- and a client that
+/// hangs up during that wait must end it just as it ends one in progress.
+struct Follow {
+    /// The client went first: a cancelled watch, not a daemon that died.
+    gone: Arc<AtomicBool>,
+    /// The sensor connection to hang up on when it does. Replaced each time
+    /// the watch reconnects.
+    hangup: Arc<Mutex<Option<UnixStream>>>,
+}
+
+impl Follow {
+    fn is_gone(&self) -> bool {
+        self.gone.load(Ordering::SeqCst)
+    }
+
+    /// Point the hang-up at `sensor`. `false` if the client has already gone,
+    /// in which case the sensor is not worth using.
+    fn attach(&self, sensor: &Sensor) -> std::io::Result<bool> {
+        let handle = sensor.hangup_handle()?;
+        *self.hangup.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        // Checked after storing, so a hang-up racing this either sees the
+        // handle and shuts it or is seen here.
+        Ok(!self.is_gone())
+    }
+}
+
+/// Hang up on `raven-fprintd` when the client hangs up on us.
+fn follow_client(client: &UnixStream) -> std::io::Result<Follow> {
     let mut client = client.try_clone()?;
-    let hangup = sensor.hangup_handle()?;
-    let gone = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&gone);
+    let follow = Follow {
+        gone: Arc::new(AtomicBool::new(false)),
+        hangup: Arc::new(Mutex::new(None)),
+    };
+    let (flag, slot) = (Arc::clone(&follow.gone), Arc::clone(&follow.hangup));
     std::thread::Builder::new()
         .name("finger-hangup".to_string())
         .spawn(move || {
@@ -273,9 +301,11 @@ fn follow_client(client: &UnixStream, sensor: &Sensor) -> std::io::Result<Arc<At
             let mut byte = [0u8; 1];
             let _ = client.read(&mut byte);
             flag.store(true, Ordering::SeqCst);
-            let _ = hangup.shutdown(std::net::Shutdown::Both);
+            if let Some(hangup) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let _ = hangup.shutdown(std::net::Shutdown::Both);
+            }
         })?;
-    Ok(gone)
+    Ok(follow)
 }
 
 /// Send one response; a client that has gone is not an error worth more than
@@ -323,6 +353,73 @@ pub(crate) fn watch<W: Write>(
     admitted
 }
 
+/// How long a watch waits for a reader that is not there yet.
+///
+/// Not a nicety. A USB reader drops off the bus across a suspend and takes a
+/// few seconds to come back, and the lock screen is started the instant the
+/// lid opens -- so the first question it asks is answered "No such device".
+/// Answering that with "the reader is not offered" left the lock screen
+/// password-only until the next lock. The same is true at boot, when this
+/// daemon can be up before `raven-fprintd` is.
+const READY_WAIT: Duration = Duration::from_secs(30);
+
+/// How often to look again while waiting.
+const READY_POLL: Duration = Duration::from_millis(500);
+
+/// Failures in a row, each within [`READY_WAIT`] of the last good start, that
+/// end a watch. A reader that drops out once overnight is reconnected to; one
+/// that fails every time it is asked is given up on.
+const MAX_REBINDS: u8 = 3;
+
+/// What waiting for the reader came to.
+enum Ready {
+    Sensor(Sensor),
+    /// Not offered, and not worth waiting for; the reason is for the client.
+    Unavailable(&'static str),
+    /// The client hung up while waiting.
+    Gone,
+}
+
+/// Connect to `raven-fprintd` and check `account` has a finger to offer,
+/// waiting up to [`READY_WAIT`] for a reader or a service that is not there
+/// yet. Nothing is sent to the client meanwhile: the screen says nothing about
+/// the reader until the reader can be used.
+fn ready_sensor(account: &str, follow: &Follow) -> Ready {
+    let deadline = Instant::now() + READY_WAIT;
+    let mut logged = false;
+    loop {
+        let reason = match connect_quick() {
+            Ok(Some(mut sensor)) => match sensor.fingers_of(account) {
+                Ok(fingers) if !fingers.is_empty() => return Ready::Sensor(sensor),
+                // Nothing to wait for: enrolling one takes the settings panel.
+                Ok(_) => return Ready::Unavailable("no fingers are enrolled"),
+                Err(e) => {
+                    if !logged {
+                        tracing::warn!(user = %account, "cannot list fingers: {e}; waiting for the reader");
+                    }
+                    "the fingerprint reader is not answering"
+                }
+            },
+            Ok(None) => "the fingerprint service is not running",
+            Err(e) => {
+                if !logged {
+                    tracing::warn!("cannot reach raven-fprintd: {e}; waiting for it");
+                }
+                "the fingerprint service is not answering"
+            }
+        };
+        logged = true;
+        if Instant::now() >= deadline {
+            tracing::warn!(user = %account, "gave up waiting for the reader: {reason}");
+            return Ready::Unavailable(reason);
+        }
+        std::thread::sleep(READY_POLL);
+        if follow.is_gone() {
+            return Ready::Gone;
+        }
+    }
+}
+
 fn watch_inner<W: Write>(
     account: &str,
     purpose: Use,
@@ -338,58 +435,8 @@ fn watch_inner<W: Write>(
         );
         return None;
     }
-    let allowed = strikes().left(account, Instant::now());
-    if allowed == 0 {
-        send(
-            writer,
-            &unavailable("too many fingers were not recognised; use the password"),
-        );
-        return None;
-    }
-
-    let mut sensor = match connect_quick() {
-        Ok(Some(sensor)) => sensor,
-        Ok(None) => {
-            send(
-                writer,
-                &unavailable("the fingerprint service is not running"),
-            );
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!("cannot reach raven-fprintd: {e}");
-            send(
-                writer,
-                &unavailable("the fingerprint service is not answering"),
-            );
-            return None;
-        }
-    };
-    match sensor.fingers_of(account) {
-        Ok(fingers) if !fingers.is_empty() => {}
-        Ok(_) => {
-            send(writer, &unavailable("no fingers are enrolled"));
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(user = %account, "cannot list fingers: {e}");
-            send(
-                writer,
-                &unavailable("the fingerprint reader is not answering"),
-            );
-            return None;
-        }
-    }
-    // From here the wait has no deadline: a lock screen sits overnight.
-    if sensor.set_read_timeout(None).is_err() {
-        send(
-            writer,
-            &unavailable("the fingerprint reader is not answering"),
-        );
-        return None;
-    }
-    let client_gone = match follow_client(client, &sensor) {
-        Ok(flag) => flag,
+    let follow = match follow_client(client) {
+        Ok(follow) => follow,
         Err(e) => {
             tracing::warn!("cannot follow the finger client: {e}");
             send(
@@ -400,46 +447,103 @@ fn watch_inner<W: Write>(
         }
     };
 
-    tracing::info!(user = %account, ?purpose, "watching the reader");
-    send(writer, &finger("Touch the fingerprint sensor."));
-
-    let verdict = sensor.watch(account, allowed, |event| match event {
-        WatchEvent::Retry(advice) => send(writer, &finger(advice)),
-        WatchEvent::Miss { .. } => {
-            strikes().miss(account, Instant::now());
-            send(writer, &finger("Not recognised. Try again."));
-        }
-    });
-
-    match verdict {
-        Ok(Watch::Matched(which)) => admit(account, which, purpose, authenticator, writer, claim),
-        Ok(Watch::Missed) => {
-            strikes().miss(account, Instant::now());
-            tracing::warn!(user = %account, ?purpose, "fingerprint not recognised; watch over");
+    let mut rebinds: u8 = 0;
+    loop {
+        let allowed = strikes().left(account, Instant::now());
+        if allowed == 0 {
             send(
                 writer,
-                &Response::Denied {
-                    message: "Fingerprint not recognised. Enter your password.".to_string(),
-                    retry_after_ms: 0,
-                },
+                &unavailable("too many fingers were not recognised; use the password"),
             );
-            None
+            return None;
         }
-        Ok(Watch::Cancelled) if client_gone.load(Ordering::SeqCst) => {
-            tracing::debug!(user = %account, "the finger client hung up");
-            None
-        }
-        Ok(Watch::Cancelled) | Err(_) => {
-            if let Err(e) = verdict {
-                tracing::warn!(user = %account, "the fingerprint watch failed: {e}");
+
+        let mut sensor = match ready_sensor(account, &follow) {
+            Ready::Sensor(sensor) => sensor,
+            Ready::Unavailable(reason) => {
+                send(writer, &unavailable(reason));
+                return None;
             }
+            Ready::Gone => {
+                tracing::debug!(user = %account, "the finger client hung up while waiting");
+                return None;
+            }
+        };
+        // From here the wait has no deadline: a lock screen sits overnight.
+        if sensor.set_read_timeout(None).is_err() {
             send(
                 writer,
-                &Response::Failed {
-                    message: "The fingerprint reader stopped responding.".to_string(),
-                },
+                &unavailable("the fingerprint reader is not answering"),
             );
-            None
+            return None;
+        }
+        match follow.attach(&sensor) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(e) => {
+                tracing::warn!("cannot follow the finger client: {e}");
+                send(
+                    writer,
+                    &unavailable("the login service is short of resources"),
+                );
+                return None;
+            }
+        }
+
+        tracing::info!(user = %account, ?purpose, "watching the reader");
+        send(writer, &finger("Touch the fingerprint sensor."));
+        let started = Instant::now();
+
+        let verdict = sensor.watch(account, allowed, |event| match event {
+            WatchEvent::Retry(advice) => send(writer, &finger(advice)),
+            WatchEvent::Miss { .. } => {
+                strikes().miss(account, Instant::now());
+                send(writer, &finger("Not recognised. Try again."));
+            }
+        });
+
+        match verdict {
+            Ok(Watch::Matched(which)) => {
+                return admit(account, which, purpose, authenticator, writer, claim);
+            }
+            Ok(Watch::Missed) => {
+                strikes().miss(account, Instant::now());
+                tracing::warn!(user = %account, ?purpose, "fingerprint not recognised; watch over");
+                send(
+                    writer,
+                    &Response::Denied {
+                        message: "Fingerprint not recognised. Enter your password.".to_string(),
+                        retry_after_ms: 0,
+                    },
+                );
+                return None;
+            }
+            Ok(Watch::Cancelled) if follow.is_gone() => {
+                tracing::debug!(user = %account, "the finger client hung up");
+                return None;
+            }
+            // The reader or its daemon went away under the watch -- a
+            // suspend, a USB reset, `raven-fprintd` restarting. Wait for it to
+            // come back rather than leaving the screen password-only.
+            Ok(Watch::Cancelled) | Err(_) => {
+                if let Err(e) = &verdict {
+                    tracing::warn!(user = %account, "the fingerprint watch failed: {e}");
+                }
+                if started.elapsed() > READY_WAIT {
+                    rebinds = 0;
+                }
+                rebinds += 1;
+                if rebinds > MAX_REBINDS {
+                    send(
+                        writer,
+                        &Response::Failed {
+                            message: "The fingerprint reader stopped responding.".to_string(),
+                        },
+                    );
+                    return None;
+                }
+                tracing::info!(user = %account, "reconnecting to the reader");
+            }
         }
     }
 }
@@ -552,10 +656,15 @@ fn enrol_inner<W: Write>(account: &str, which: Finger, client: &UnixStream, writ
     if sensor.set_read_timeout(None).is_err() {
         return failed(writer, "The fingerprint reader is not answering.");
     }
-    let client_gone = match follow_client(client, &sensor) {
-        Ok(flag) => flag,
+    let follow = match follow_client(client) {
+        Ok(follow) => follow,
         Err(_) => return failed(writer, "The login service is short of resources."),
     };
+    match follow.attach(&sensor) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(_) => return failed(writer, "The login service is short of resources."),
+    }
 
     tracing::info!(user = %account, finger = which.as_str(), "enrolling");
     send(
@@ -587,7 +696,7 @@ fn enrol_inner<W: Write>(account: &str, which: Finger, client: &UnixStream, writ
             tracing::info!(user = %account, finger = which.as_str(), "enrolled");
             send(writer, &Response::FingerEnrolled { finger: which });
         }
-        Ok(false) if client_gone.load(Ordering::SeqCst) => {
+        Ok(false) if follow.is_gone() => {
             tracing::info!(user = %account, "enrolment cancelled");
         }
         Ok(false) => failed(writer, "The fingerprint reader stopped responding."),
