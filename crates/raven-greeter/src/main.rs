@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 mod client;
+mod finger;
 mod preview;
 
 use std::time::{Duration, Instant};
@@ -57,11 +58,12 @@ use smithay_client_toolkit::reexports::client::protocol::{
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 
 use raven_ui::canvas::Canvas;
-use raven_ui::screen::{Action, Message, MessageKind, PasswordScreen};
+use raven_ui::screen::{Action, FingerKind, FingerPrompt, Message, MessageKind, PasswordScreen};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::{self, Wallpaper};
 
 use crate::client::{Attempt, Client};
+use crate::finger::{Event as FingerEvent, FingerWatch};
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -183,7 +185,13 @@ fn run() -> Result<()> {
         },
         text: TextRenderer::new(),
         daemon,
+        finger: None,
+        finger_prompts: 0,
     };
+    // Offered from the first frame, for whoever is selected. If the account
+    // has no finger to offer, or the machine has no reader, the daemon says so
+    // a moment later and nothing about the screen changes.
+    greeter.watch_finger();
 
     while !greeter.exit {
         queue
@@ -217,6 +225,12 @@ struct Greeter {
     screen: PasswordScreen,
     text: TextRenderer,
     daemon: Client,
+    /// The reader, watched for the selected account. Replaced when somebody
+    /// else is selected, and dropped -- which cancels it -- once it is over.
+    finger: Option<FingerWatch>,
+    /// Prompts heard from the current watch: the first is the invitation,
+    /// the rest are corrections and are shown as such.
+    finger_prompts: u32,
 }
 
 impl std::fmt::Debug for Greeter {
@@ -234,8 +248,78 @@ impl std::fmt::Debug for Greeter {
 }
 
 impl Greeter {
+    /// Watch the reader for whoever is selected, if that is not already who
+    /// it is being watched for.
+    fn watch_finger(&mut self) {
+        let Some(user) = self.screen.current().map(|u| u.name.clone()) else {
+            return;
+        };
+        if self.finger.as_ref().is_some_and(|w| w.username() == user) {
+            return;
+        }
+        // Dropped first, so the daemon has let go of the reader for the last
+        // account before it is asked to watch for this one.
+        self.finger = None;
+        self.finger_prompts = 0;
+        self.screen.set_finger(None);
+        self.finger = FingerWatch::start(&user);
+    }
+
+    /// Act on whatever the reader has done since the last frame.
+    fn poll_finger(&mut self) {
+        let Some(watch) = &self.finger else {
+            return;
+        };
+        for event in watch.drain() {
+            match event {
+                FingerEvent::Prompt(text) => {
+                    let kind = if self.finger_prompts == 0 {
+                        FingerKind::Waiting
+                    } else {
+                        FingerKind::Retry
+                    };
+                    self.finger_prompts += 1;
+                    self.screen.set_finger(Some(FingerPrompt { text, kind }));
+                }
+                FingerEvent::Granted => {
+                    // The daemon has already started the session, exactly as
+                    // for a password; this is the same departure.
+                    tracing::info!("granted by fingerprint");
+                    self.screen.set_finger(Some(FingerPrompt {
+                        text: "Fingerprint recognised.".to_string(),
+                        kind: FingerKind::Accepted,
+                    }));
+                    self.screen.set_message(Some(Message {
+                        text: "Welcome back.".to_string(),
+                        kind: MessageKind::Success,
+                    }));
+                    self.screen.dismiss();
+                    self.finger = None;
+                    return;
+                }
+                FingerEvent::Denied(text) => {
+                    // A warning, not an error: nothing was typed wrong, and
+                    // the field has been waiting the whole time.
+                    self.screen.set_finger(None);
+                    self.screen.set_message(Some(Message {
+                        text,
+                        kind: MessageKind::Warning,
+                    }));
+                    self.finger = None;
+                    return;
+                }
+                FingerEvent::Ended => {
+                    self.screen.set_finger(None);
+                    self.finger = None;
+                    return;
+                }
+            }
+        }
+    }
+
     /// Render one frame and request the next.
     fn draw(&mut self, qh: &QueueHandle<Self>) {
+        self.poll_finger();
         if self.width == 0 || self.height == 0 {
             return;
         }
@@ -300,6 +384,7 @@ impl Greeter {
                 // this process when the session is up; until then the frames
                 // keep coming and the screen lifts away under them.
                 self.screen.dismiss();
+                self.finger = None;
             }
             Ok(Attempt::Denied {
                 message,
@@ -513,8 +598,14 @@ impl Greeter {
                 self.screen.clear_password();
                 self.screen.set_message(None);
             }
-            Key::NextUser => self.screen.next_user(),
-            Key::PreviousUser => self.screen.previous_user(),
+            Key::NextUser => {
+                self.screen.next_user();
+                self.watch_finger();
+            }
+            Key::PreviousUser => {
+                self.screen.previous_user();
+                self.watch_finger();
+            }
             Key::Text(text) => {
                 for c in text.chars() {
                     self.screen.push_char(c);

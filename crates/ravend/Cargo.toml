@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 raven-auth.workspace = true
 raven-greet-proto.workspace = true
+raven-finger.workspace = true
 raven-privdrop.workspace = true
 
 anyhow.workspace = true

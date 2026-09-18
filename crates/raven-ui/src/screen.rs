@@ -143,6 +143,41 @@ impl MessageKind {
     }
 }
 
+/// What the fingerprint reader is doing, shown under the field.
+///
+/// Beside the password, never instead of it: the field stays focused and
+/// typeable the whole time this is showing, because a reader that has stopped
+/// working must be something somebody can ignore rather than something they
+/// have to get past.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerPrompt {
+    pub text: String,
+    pub kind: FingerKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FingerKind {
+    /// Waiting for a finger.
+    Waiting,
+    /// The last reading could not be used, or was not recognised.
+    Retry,
+    /// Recognised; the screen is about to go.
+    Accepted,
+}
+
+impl FingerKind {
+    fn color(self, dim: Color) -> Color {
+        match self {
+            Self::Waiting => dim,
+            Self::Retry => theme::WARNING,
+            Self::Accepted => theme::SUCCESS,
+        }
+    }
+}
+
+/// How far the fingerprint glyph swells on a retry, as a fraction of its size.
+const FINGER_PULSE_KICK: f32 = 6.0;
+
 /// What a keystroke asked the screen to do that it cannot do itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -227,6 +262,12 @@ pub struct PasswordScreen {
     unlock: Spring,
     spinner_angle: f32,
     line: Line,
+    /// The reader's row under the line, if a reader is being watched.
+    finger: Option<FingerPrompt>,
+    /// `1.0` when the finger row is showing.
+    finger_mix: Spring,
+    /// Swell of the fingerprint glyph; kicked on a retry and settles to zero.
+    finger_pulse: Spring,
 }
 
 impl PasswordScreen {
@@ -280,6 +321,9 @@ impl PasswordScreen {
                 color: theme::TEXT_DIM,
                 alpha: Spring::at(0.0, STATE),
             },
+            finger: None,
+            finger_mix: Spring::at(0.0, STATE),
+            finger_pulse: Spring::at(0.0, SHAKE),
         }
     }
 
@@ -346,6 +390,27 @@ impl PasswordScreen {
             self.shake.kick(SHAKE_KICK);
         }
         self.message = message;
+    }
+
+    /// Show what the fingerprint reader is doing, or hide the row with `None`.
+    ///
+    /// A retry swells the glyph for a moment, the way a denial shakes the
+    /// field: the change is felt before the words are read.
+    pub fn set_finger(&mut self, prompt: Option<FingerPrompt>) {
+        if let Some(next) = &prompt
+            && next.kind == FingerKind::Retry
+            && self.finger.as_ref() != Some(next)
+            && !self.reduced_motion
+        {
+            self.finger_pulse.kick(FINGER_PULSE_KICK);
+        }
+        self.finger = prompt;
+    }
+
+    /// What the finger row is showing.
+    #[must_use]
+    pub fn finger(&self) -> Option<&FingerPrompt> {
+        self.finger.as_ref()
     }
 
     /// Clear the typed password without touching anything else.
@@ -507,6 +572,8 @@ impl PasswordScreen {
             || !self.throttle_mix.settled()
             || !self.unlock.settled()
             || !self.line.alpha.settled()
+            || !self.finger_mix.settled()
+            || !self.finger_pulse.settled()
             || self
                 .dots
                 .iter()
@@ -595,12 +662,15 @@ impl PasswordScreen {
             .set_target(if throttled { 1.0 } else { 0.0 });
 
         self.sync_line(now);
+        self.finger_mix
+            .set_target(if self.finger.is_some() { 1.0 } else { 0.0 });
 
         if self.reduced_motion {
             // Position and size snap; only opacity and colour take time.
             self.shake.snap(0.0);
             self.caret_x.snap(self.caret_x.target());
             self.unlock.snap(self.unlock.target());
+            self.finger_pulse.snap(0.0);
             for dot in &mut self.dots {
                 dot.x.snap(dot.x.target());
                 dot.scale.snap(dot.scale.target());
@@ -616,6 +686,8 @@ impl PasswordScreen {
         self.throttle_mix.step(dt);
         self.unlock.step(dt);
         self.line.alpha.step(dt);
+        self.finger_mix.step(dt);
+        self.finger_pulse.step(dt);
         for dot in &mut self.dots {
             dot.x.step(dt);
             dot.scale.step(dt);
@@ -834,6 +906,8 @@ impl PasswordScreen {
         y = self.draw_field(canvas, text, &frame, backdrop, y, now);
         y += s(14.0);
         self.draw_line(canvas, text, &frame, y);
+        y += s(theme::SMALL_SIZE) * 1.25 + s(12.0);
+        self.draw_finger(canvas, text, &frame, y);
 
         self.draw_footer(canvas, text, &frame, w, h);
 
@@ -1112,6 +1186,47 @@ impl PasswordScreen {
         );
     }
 
+    /// The reader's row: a fingerprint and what it wants, centred as a pair.
+    fn draw_finger(&self, canvas: &mut Canvas<'_>, text: &mut TextRenderer, frame: &Frame, y: f32) {
+        let alpha = self.finger_mix.value().clamp(0.0, 1.0) * frame.alpha;
+        let Some(prompt) = &self.finger else {
+            return;
+        };
+        if alpha <= 0.0 {
+            return;
+        }
+        let s = |v: f32| v * frame.scale;
+        let style =
+            TextStyle::new(theme::SMALL_SIZE, FontWeight::NORMAL).tracked(theme::SMALL_TRACKING);
+        let color = prompt.kind.color(self.dim()).faded(alpha);
+
+        // Laid out in logical pixels, then scaled: the glyph, a gap, the words.
+        let glyph = 9.0;
+        let gap = 8.0;
+        let words = text.measure(&prompt.text, style);
+        let left = frame.cx - s(glyph * 2.0 + gap + words) / 2.0;
+        let line_height = theme::SMALL_SIZE * 1.25;
+        let gy = frame.y(y) + s(line_height) / 2.0;
+
+        draw_fingerprint(
+            canvas,
+            left + s(glyph),
+            gy,
+            s(glyph) * (1.0 + 0.04 * self.finger_pulse.value()),
+            s(1.3),
+            color,
+        );
+        text.draw(
+            canvas,
+            &prompt.text,
+            left + s(glyph * 2.0 + gap),
+            frame.y(y),
+            style.scaled(frame.scale),
+            color,
+            Align::Left,
+        );
+    }
+
     /// Hostname on the left, distribution on the right.
     ///
     /// Not lifted with the rest: it is the label on the screen, not a thing
@@ -1184,6 +1299,43 @@ impl Frame {
     /// A canvas y, lifted about the pivot.
     fn y(&self, y: f32) -> f32 {
         self.pivot + (y - self.pivot) * self.lift
+    }
+}
+
+/// A fingerprint, as nested arcs open at the bottom, about `(cx, cy)`.
+///
+/// Drawn rather than taken from a font: the login screen ships no icon font,
+/// and a glyph the size of a line of small text is four strokes.
+fn draw_fingerprint(
+    canvas: &mut Canvas<'_>,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    stroke: f32,
+    color: Color,
+) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    // Twelve o'clock, in the canvas's clockwise-from-three-o'clock angles.
+    let top = -FRAC_PI_2;
+    // The core is a short loop; each ring out is wider and a little turned, so
+    // the gaps do not line up into a seam.
+    let rings = [
+        (0.22, 1.1, 0.0),
+        (0.46, 1.35, 0.10),
+        (0.70, 1.5, -0.06),
+        (0.94, 1.62, 0.04),
+    ];
+    for (reach, sweep, turn) in rings {
+        let sweep = sweep * PI;
+        canvas.arc(
+            cx,
+            cy,
+            radius * reach,
+            stroke,
+            top - sweep / 2.0 + turn,
+            sweep,
+            color,
+        );
     }
 }
 
@@ -1447,6 +1599,35 @@ mod tests {
         );
     }
 
+    /// The reader is offered beside the password, never instead of it.
+    #[test]
+    fn a_finger_prompt_leaves_the_field_typeable() {
+        let mut s = screen();
+        s.set_finger(Some(FingerPrompt {
+            text: "Touch the fingerprint sensor.".to_string(),
+            kind: FingerKind::Waiting,
+        }));
+        s.push_char('a');
+        assert!(!s.is_busy());
+        assert!(matches!(s.submit(Instant::now()), Action::Submit { .. }));
+    }
+
+    #[test]
+    fn a_retry_swells_the_glyph_unless_motion_is_reduced() {
+        let retry = FingerPrompt {
+            text: "Try again.".to_string(),
+            kind: FingerKind::Retry,
+        };
+        let mut s = screen();
+        s.set_finger(Some(retry.clone()));
+        assert!(!s.finger_pulse.settled());
+
+        let mut calm = screen();
+        calm.set_reduced_motion(true);
+        calm.set_finger(Some(retry));
+        assert!(calm.finger_pulse.settled());
+    }
+
     #[test]
     fn humanize_reads_like_a_countdown() {
         assert_eq!(humanize(Duration::from_secs(12)), "12s");
@@ -1684,6 +1865,19 @@ mod tests {
             now += Duration::from_millis(16);
             frame(&mut s, now);
         }
+        s.set_finger(Some(FingerPrompt {
+            text: "Touch the fingerprint sensor.".to_string(),
+            kind: FingerKind::Waiting,
+        }));
+        for _ in 0..5 {
+            now += Duration::from_millis(16);
+            frame(&mut s, now);
+        }
+        s.set_finger(Some(FingerPrompt {
+            text: "Centre your finger on the sensor.".to_string(),
+            kind: FingerKind::Retry,
+        }));
+        frame(&mut s, now);
         s.set_caps_lock(true);
         let _ = s.submit(now);
         frame(&mut s, now);

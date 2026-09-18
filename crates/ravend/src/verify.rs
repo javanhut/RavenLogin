@@ -45,8 +45,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use raven_auth::{Account, Authenticator, Denial, Outcome};
-use raven_greet_proto::{Request, Response, User, VERIFY_SOCKET_PATH};
+use raven_greet_proto::{Request, Response, Secret, User, VERIFY_SOCKET_PATH};
 
+use crate::finger::{self, Use};
 use crate::ratelimit::{Limits, RateLimiter};
 
 /// How long a connection may sit silent before it is dropped.
@@ -207,6 +208,10 @@ fn serve(
         .context("cannot set a write timeout")?;
 
     let mut reader = BufReader::new(stream.try_clone().context("cannot clone the stream")?);
+    // Kept for the two requests that turn the connection into a stream: they
+    // need the socket itself, to notice the client hanging up and to end the
+    // conversation when the verdict is out.
+    let handle = stream.try_clone().context("cannot clone the stream")?;
     let mut writer = BufWriter::new(stream);
 
     loop {
@@ -216,8 +221,43 @@ fn serve(
             Err(e) => return Err(anyhow::Error::new(e).context("cannot read a request")),
         };
 
-        let response = answer(request, &account, authenticator, limiter);
-        raven_greet_proto::write_message(&mut writer, &response)?;
+        match request {
+            // The connection is the watch from here, and it ends with it.
+            Request::WatchFinger => {
+                if finger::watch(
+                    &account.name,
+                    Use::Unlock,
+                    authenticator,
+                    &handle,
+                    &mut writer,
+                    || true,
+                )
+                .is_some()
+                {
+                    limiter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_success(&account.name);
+                }
+                return Ok(());
+            }
+            // The password first, through the same throttle as an unlock:
+            // enrolling a finger is a way in, and only the account's owner may
+            // add one.
+            Request::EnrolFinger { finger, secret } => {
+                match verify(&account, secret.as_bytes(), authenticator, limiter) {
+                    Response::Verified => {
+                        finger::enrol(&account.name, finger, &handle, &mut writer);
+                        return Ok(());
+                    }
+                    refused => raven_greet_proto::write_message(&mut writer, &refused)?,
+                }
+            }
+            request => {
+                let response = answer(request, &account, authenticator, limiter);
+                raven_greet_proto::write_message(&mut writer, &response)?;
+            }
+        }
     }
 }
 
@@ -242,6 +282,40 @@ fn answer(
 
         Request::Verify { secret } => verify(account, secret.as_bytes(), authenticator, limiter),
 
+        Request::FingerStatus => finger::status(&account.name),
+        Request::ForgetFinger { finger } => finger::forget(&account.name, finger),
+        Request::SetFingerPolicy { policy, secret } => {
+            let current = raven_finger::policy::load(&account.name);
+            // Switching a use on is what takes the password; switching one off
+            // never does, so a finger somebody no longer trusts can always be
+            // turned away in one click.
+            if current.widened_by(policy) {
+                match password_for_change(account, secret.as_ref(), authenticator, limiter) {
+                    Response::Verified => {}
+                    refused => return refused,
+                }
+            }
+            finger::set_policy(&account.name, policy)
+        }
+
+        // Streaming requests, handled in `serve` before this is reached. Here
+        // only so the match is total.
+        Request::WatchFinger | Request::EnrolFinger { .. } => Response::Failed {
+            message: "This request needs the connection to itself.".to_string(),
+        },
+
+        // The login screen's, on the login screen's socket. On this one it
+        // would let a session watch the reader for somebody else's finger.
+        Request::LoginByFinger { .. } => {
+            tracing::warn!(
+                user = %account.name,
+                "refused a login-by-finger request on the verify socket"
+            );
+            Response::Failed {
+                message: "This socket does not start sessions.".to_string(),
+            }
+        }
+
         // The refusal that matters. `Authenticate` is what starts a session,
         // and it is not a thing this socket does for anybody -- not for the
         // account that owns the connection, not for root. A lock screen that
@@ -260,6 +334,23 @@ fn answer(
         // login screen, which has its own socket and its own reasons.
         Request::ListUsers | Request::Wallpaper => Response::Failed {
             message: "This socket answers only about the account that is asking.".to_string(),
+        },
+    }
+}
+
+/// The password a change to the fingerprint policy needs, checked like any
+/// other: through the throttle, against the connection's own account.
+fn password_for_change(
+    account: &Account,
+    secret: Option<&Secret>,
+    authenticator: &Authenticator,
+    limiter: &Mutex<RateLimiter>,
+) -> Response {
+    match secret {
+        Some(secret) => verify(account, secret.as_bytes(), authenticator, limiter),
+        None => Response::Denied {
+            message: "Enter your password to turn this on.".to_string(),
+            retry_after_ms: 0,
         },
     }
 }
@@ -293,7 +384,8 @@ fn verify(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .record_success(&account.name);
-            tracing::info!(user = %account.name, "unlocked");
+            finger::password_succeeded(&account.name);
+            tracing::info!(user = %account.name, "password accepted");
             Response::Verified
         }
         Ok(Outcome::Denied(denial)) => {
@@ -408,6 +500,37 @@ mod tests {
             }
             other => panic!("expected the peer's own account, got {other:?}"),
         }
+    }
+
+    /// Watching the reader for a named account would let a session wait for
+    /// somebody else's finger. The login screen's request stays there.
+    #[test]
+    fn a_finger_login_is_refused_here() {
+        let authenticator = Authenticator::new(Default::default());
+        let response = answer(
+            Request::LoginByFinger {
+                username: "somebody".to_string(),
+            },
+            &account(),
+            &authenticator,
+            &limiter(),
+        );
+        assert!(
+            matches!(response, Response::Failed { .. }),
+            "got {response:?}"
+        );
+    }
+
+    /// Switching a use on needs the password, and a request without one is
+    /// refused before anything is written.
+    #[test]
+    fn widening_the_finger_policy_without_a_password_is_denied() {
+        let authenticator = Authenticator::new(Default::default());
+        let response = password_for_change(&account(), None, &authenticator, &limiter());
+        assert!(
+            matches!(response, Response::Denied { .. }),
+            "got {response:?}"
+        );
     }
 
     #[test]

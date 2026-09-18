@@ -61,7 +61,7 @@ chown "${GREETER_USER}:${GREETER_USER}" "${GREETER_HOME}"
 
 # --- binaries --------------------------------------------------------------
 if [ ! -x target/release/ravend ] || [ ! -x target/release/raven-greeter ] \
-    || [ ! -x target/release/raven-lock ]; then
+    || [ ! -x target/release/raven-lock ] || [ ! -x target/release/raven-finger-auth ]; then
     echo "Build first: cargo build --release" >&2
     exit 1
 fi
@@ -73,7 +73,20 @@ install -D -m 0755 target/release/raven-greeter "${PREFIX}/bin/raven-greeter"
 # installed separately -- and an old copy left behind is a lock screen that
 # dies on its first frame whenever the protocol handling has moved on.
 install -D -m 0755 target/release/raven-lock    "${PREFIX}/bin/raven-lock"
-echo "ok    installed ravend, raven-greeter and raven-lock into ${PREFIX}/bin"
+# What PAM runs so sudo can take a finger instead of the password. Installing
+# it changes nothing on its own: /etc/pam.d/sudo does not name it until the
+# account's owner turns fingerprint sudo on in Settings, which offers to run
+# `raven-finger-auth --install-pam`; and even then it steps aside unless that
+# account asked for it. See crates/raven-finger.
+install -D -m 0755 target/release/raven-finger-auth "${PREFIX}/bin/raven-finger-auth"
+echo "ok    installed ravend, raven-greeter, raven-lock and raven-finger-auth into ${PREFIX}/bin"
+
+# Where each account's fingerprint choices live. Root's alone: whether a
+# finger may stand in for a password is not something a process running as
+# that account may decide for itself. ravend creates it too; doing it here
+# means the mode is right from the first boot.
+install -d -m 0700 /var/lib/raven-login /var/lib/raven-login/fingerprint
+echo "ok    /var/lib/raven-login/fingerprint exists, root-only"
 
 # --- config ----------------------------------------------------------------
 #

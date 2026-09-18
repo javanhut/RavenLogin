@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
 
 use raven_greet_proto::User;
 use raven_ui::canvas::Canvas;
-use raven_ui::screen::{Message, MessageKind, PasswordScreen};
+use raven_ui::screen::{FingerKind, FingerPrompt, Message, MessageKind, PasswordScreen};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::Wallpaper;
 
@@ -115,7 +115,7 @@ pub(crate) fn main(args: &[String]) -> Result<()> {
         .map_or(Some(State::Empty), |s| State::parse(s))
         .context(
             "the state should be one of: empty, typing, denied, caps, busy, throttled, \
-             unlocking, arriving",
+             unlocking, arriving, finger, finger-retry",
         )?;
     if let Some(extra) = positional.get(3) {
         anyhow::bail!("unexpected argument {extra}");
@@ -194,6 +194,14 @@ pub(crate) fn render(
 
     match state {
         State::Empty | State::Typing | State::Arriving => {}
+        State::Finger => screen.set_finger(Some(FingerPrompt {
+            text: "Touch the fingerprint sensor.".to_string(),
+            kind: FingerKind::Waiting,
+        })),
+        State::FingerRetry => screen.set_finger(Some(FingerPrompt {
+            text: "Centre your finger on the sensor.".to_string(),
+            kind: FingerKind::Retry,
+        })),
         State::CapsLock => screen.set_caps_lock(true),
         State::Busy => {
             let _ = screen.submit(now);
@@ -270,6 +278,10 @@ pub(crate) enum State {
     Unlocking,
     /// The first frames: the screen settling into place.
     Arriving,
+    /// A reader being watched, beside the password.
+    Finger,
+    /// A reading the sensor could not use.
+    FingerRetry,
 }
 
 impl State {
@@ -283,6 +295,8 @@ impl State {
             "throttled" => Some(Self::Throttled),
             "unlocking" => Some(Self::Unlocking),
             "arriving" => Some(Self::Arriving),
+            "finger" => Some(Self::Finger),
+            "finger-retry" => Some(Self::FingerRetry),
             _ => None,
         }
     }

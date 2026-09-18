@@ -134,6 +134,135 @@ pub struct User {
     pub initial: char,
 }
 
+/// Which finger a template was taken from.
+///
+/// Serialized as the word `raven-fprintd` stores on the sensor --
+/// `right-index` -- so the name in a message, the name in a record and the
+/// name in the policy file are the same string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Finger {
+    LeftThumb,
+    LeftIndex,
+    LeftMiddle,
+    LeftRing,
+    LeftLittle,
+    RightThumb,
+    RightIndex,
+    RightMiddle,
+    RightRing,
+    RightLittle,
+}
+
+impl Finger {
+    /// Every finger, in the order a picker lists them.
+    pub const ALL: [Self; 10] = [
+        Self::RightIndex,
+        Self::LeftIndex,
+        Self::RightThumb,
+        Self::LeftThumb,
+        Self::RightMiddle,
+        Self::LeftMiddle,
+        Self::RightRing,
+        Self::LeftRing,
+        Self::RightLittle,
+        Self::LeftLittle,
+    ];
+
+    /// The word on the sensor and on the wire.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeftThumb => "left-thumb",
+            Self::LeftIndex => "left-index",
+            Self::LeftMiddle => "left-middle",
+            Self::LeftRing => "left-ring",
+            Self::LeftLittle => "left-little",
+            Self::RightThumb => "right-thumb",
+            Self::RightIndex => "right-index",
+            Self::RightMiddle => "right-middle",
+            Self::RightRing => "right-ring",
+            Self::RightLittle => "right-little",
+        }
+    }
+
+    /// What to call it on screen.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LeftThumb => "Left thumb",
+            Self::LeftIndex => "Left index finger",
+            Self::LeftMiddle => "Left middle finger",
+            Self::LeftRing => "Left ring finger",
+            Self::LeftLittle => "Left little finger",
+            Self::RightThumb => "Right thumb",
+            Self::RightIndex => "Right index finger",
+            Self::RightMiddle => "Right middle finger",
+            Self::RightRing => "Right ring finger",
+            Self::RightLittle => "Right little finger",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`]. `None` for a record some other stack
+    /// wrote under a name this one does not use.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == word)
+    }
+}
+
+/// Where an account has said a finger may stand in for its password.
+///
+/// Everything is off until the account's owner turns it on, and turning any of
+/// it on takes the password: a finger is a weaker proof than a password in one
+/// important way -- it can be enrolled by whoever is sitting at an unlocked
+/// machine -- so the switch that trusts it is guarded by the stronger one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FingerPolicy {
+    /// At the login screen, for this account.
+    pub login: bool,
+    /// At the lock screen, for this account's own session.
+    pub unlock: bool,
+    /// In place of the password `sudo` asks for.
+    pub sudo: bool,
+}
+
+impl FingerPolicy {
+    /// Whether `next` switches on anything this one has off -- the changes
+    /// that need the password.
+    #[must_use]
+    pub fn widened_by(self, next: Self) -> bool {
+        (next.login && !self.login) || (next.unlock && !self.unlock) || (next.sudo && !self.sudo)
+    }
+}
+
+/// What the machine has in the way of a fingerprint reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Reader {
+    /// `raven-fprintd` is not running, so there is nobody to ask.
+    NoService,
+    /// The daemon is running and there is no reader plugged in.
+    Absent,
+    /// A reader is there.
+    Present {
+        /// Good readings the sensor wants for one template.
+        stages: u8,
+        /// Templates stored on it, for every account.
+        stored: u8,
+        /// Firmware version, as the sensor reports it.
+        firmware: String,
+    },
+}
+
+impl Reader {
+    #[must_use]
+    pub fn is_present(&self) -> bool {
+        matches!(self, Self::Present { .. })
+    }
+}
+
 /// Greeter to daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -162,6 +291,52 @@ pub enum Request {
     /// valid on [`VERIFY_SOCKET_PATH`]; answered with [`Response::Verified`] or
     /// [`Response::Denied`], and never with anything that starts a session.
     Verify { secret: Secret },
+
+    /// Watch the reader for this connection's account, and let the lock screen
+    /// go if one of its fingers is presented.
+    ///
+    /// Carries no username, like `Verify`, and for the same reason. Only valid
+    /// on [`VERIFY_SOCKET_PATH`]. Answered with [`Response::FingerUnavailable`]
+    /// if the account has not turned this on or has nothing enrolled;
+    /// otherwise with a run of [`Response::Finger`] and then exactly one of
+    /// [`Response::Verified`], [`Response::Denied`] or [`Response::Failed`].
+    ///
+    /// The connection *is* the watch: it is closed by the daemon once the
+    /// verdict is sent, and if the client closes it first the daemon puts the
+    /// reader down. There is no cancel request, because a cancel that had to
+    /// be delivered is a sensor left running for a lock screen that has died.
+    WatchFinger,
+    /// Watch the reader for this account, and log it in if one of its fingers
+    /// is presented.
+    ///
+    /// Only valid on [`SOCKET_PATH`], and only for an account whose owner has
+    /// turned fingerprint login on. The account is named because at the login
+    /// screen nobody is logged in to be the connection's owner -- but the name
+    /// only chooses whose fingers count: a finger enrolled to anybody else is
+    /// a miss, however cleanly it matches. Streams like `WatchFinger`, ending
+    /// in [`Response::Granted`] rather than `Verified`.
+    LoginByFinger { username: String },
+    /// Is there a reader, which of this account's fingers are enrolled, and
+    /// where has it said they may be used? Only valid on
+    /// [`VERIFY_SOCKET_PATH`]; answered with [`Response::FingerStatus`].
+    FingerStatus,
+    /// Enrol one of this account's fingers, replacing any template it already
+    /// has. Takes the password: see [`FingerPolicy`].
+    ///
+    /// Only valid on [`VERIFY_SOCKET_PATH`]. Streams [`Response::Finger`] with
+    /// progress, then one of [`Response::FingerEnrolled`], [`Response::Denied`]
+    /// (the password) or [`Response::Failed`], and the connection closes.
+    EnrolFinger { finger: Finger, secret: Secret },
+    /// Forget one of this account's fingers, or all of them with `None`.
+    /// Never another account's. Answered with [`Response::FingerStatus`].
+    ForgetFinger { finger: Option<Finger> },
+    /// Change where this account's fingers may be used. `secret` is required
+    /// when the change switches anything on, and ignored otherwise. Answered
+    /// with [`Response::FingerStatus`] or [`Response::Denied`].
+    SetFingerPolicy {
+        policy: FingerPolicy,
+        secret: Option<Secret>,
+    },
 }
 
 /// Daemon to greeter.
@@ -222,6 +397,32 @@ pub enum Response {
     /// unreadable `/etc/shadow`, a session that would not start.
     Failed {
         message: String,
+    },
+    /// One reading, mid-watch or mid-enrolment. Not a verdict.
+    Finger {
+        /// Already filtered for display, as `Denied`'s message is.
+        message: String,
+        /// Enrolment only: good readings so far, and how many are wanted.
+        progress: Option<(u8, u8)>,
+    },
+    /// The reader cannot be offered for this, and the screen should show only
+    /// the password. Not an error: no reader, nothing enrolled and "the owner
+    /// has not turned this on" are all ordinary.
+    FingerUnavailable {
+        /// Why, for a log line or a settings panel. A login screen shows
+        /// nothing at all rather than this.
+        reason: String,
+    },
+    /// The answer to [`Request::FingerStatus`], and to the requests that
+    /// change it.
+    FingerStatus {
+        reader: Reader,
+        enrolled: Vec<Finger>,
+        policy: FingerPolicy,
+    },
+    /// An enrolment finished and the template is on the sensor.
+    FingerEnrolled {
+        finger: Finger,
     },
 }
 
@@ -397,6 +598,67 @@ mod tests {
             read_message::<_, Request>(&mut framed.as_slice()),
             Err(Error::Closed)
         ));
+    }
+
+    /// Finger names on the wire are the words on the sensor, so a record, a
+    /// message and a policy file all say `right-index`.
+    #[test]
+    fn fingers_are_named_as_the_sensor_names_them() {
+        for finger in Finger::ALL {
+            let json = serde_json::to_string(&finger).expect("serializes");
+            assert_eq!(json, format!("\"{}\"", finger.as_str()));
+            assert_eq!(Finger::parse(finger.as_str()), Some(finger));
+        }
+        assert_eq!(Finger::parse("sixth-finger"), None);
+    }
+
+    /// The lock screen's watch carries no account, like `Verify`.
+    #[test]
+    fn watch_finger_names_no_account() {
+        let mut wire = Vec::new();
+        write_message(&mut wire, &Request::WatchFinger).expect("serializes");
+        assert!(!String::from_utf8_lossy(&wire).contains("username"));
+    }
+
+    /// Enrolment carries the password, so it must be as redacted as `Verify`.
+    #[test]
+    fn an_enrolment_password_is_redacted() {
+        let request = Request::EnrolFinger {
+            finger: Finger::RightIndex,
+            secret: Secret::new("hunter2".to_string()),
+        };
+        assert!(!format!("{request:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn finger_status_round_trips() {
+        let response = Response::FingerStatus {
+            reader: Reader::Present {
+                stages: 9,
+                stored: 1,
+                firmware: "0104".to_string(),
+            },
+            enrolled: vec![Finger::RightIndex],
+            policy: FingerPolicy {
+                login: false,
+                unlock: true,
+                sudo: true,
+            },
+        };
+        let mut buffer = Vec::new();
+        write_message(&mut buffer, &response).expect("writes");
+        match read_message(&mut buffer.as_slice()).expect("reads") {
+            Response::FingerStatus {
+                reader,
+                enrolled,
+                policy,
+            } => {
+                assert!(reader.is_present());
+                assert_eq!(enrolled, vec![Finger::RightIndex]);
+                assert!(policy.unlock && policy.sudo && !policy.login);
+            }
+            other => panic!("expected FingerStatus, got {other:?}"),
+        }
     }
 
     /// The single most valuable property in this file: a password cannot be

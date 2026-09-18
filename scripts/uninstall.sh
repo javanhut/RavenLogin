@@ -109,7 +109,14 @@ if [ -f "${DROPIN_DIR}/seatd.toml" ]; then
 fi
 
 # --- binaries --------------------------------------------------------------
-for bin in ravend raven-greeter raven-lock; do
+# The PAM line first, while the binary that knows how to remove it is still
+# here. Left behind it would be harmless -- pam_exec failing on a missing
+# program falls through to the password -- but it would be a line in sudo's
+# config pointing at nothing.
+if [ -x "${PREFIX}/bin/raven-finger-auth" ]; then
+    "${PREFIX}/bin/raven-finger-auth" --remove-pam || true
+fi
+for bin in ravend raven-greeter raven-lock raven-finger-auth; do
     if [ -e "${PREFIX}/bin/${bin}" ]; then
         rm -f "${PREFIX}/bin/${bin}"
         echo "ok    removed ${PREFIX}/bin/${bin}"
@@ -120,6 +127,9 @@ done
 
 # --- config and account, only on --purge -----------------------------------
 if [ "${PURGE}" = "1" ]; then
+    # Everyone's fingerprint choices. The templates themselves are on the
+    # reader and belong to raven-fprintd; Settings removes those.
+    rm -rf /var/lib/raven-login/fingerprint
     if [ -f "${SYSCONFDIR}/raven/login.toml" ]; then
         rm -f "${SYSCONFDIR}/raven/login.toml"
         echo "ok    removed ${SYSCONFDIR}/raven/login.toml"

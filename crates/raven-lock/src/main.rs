@@ -45,12 +45,13 @@
 //! `blocking_dispatch`.
 
 mod client;
+mod finger;
 
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use raven_ui::canvas::Canvas;
-use raven_ui::screen::{Action, Message, MessageKind, PasswordScreen};
+use raven_ui::screen::{Action, FingerKind, FingerPrompt, Message, MessageKind, PasswordScreen};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::{self, Wallpaper};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, FrameCallbackData};
@@ -77,6 +78,8 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_registry, registry_handlers};
 
 use crate::client::{Attempt, Client};
+use crate::finger::{Event as FingerEvent, FingerWatch};
+use smithay_client_toolkit::reexports::calloop::channel::Event as ChannelEvent;
 
 /// How long the screen gets to finish leaving after the password is
 /// accepted, before the session is revealed regardless.
@@ -86,6 +89,11 @@ use crate::client::{Attempt, Client};
 /// stopped drawing does not keep somebody who has typed the right password
 /// waiting in front of a screen that will not go away.
 const UNLOCK_DEADLINE: Duration = Duration::from_millis(900);
+
+/// How long to wait before asking for the reader again after a watch broke --
+/// the daemon restarted, the reader was unplugged and plugged back in. Long
+/// enough that a daemon which is down stays a few cheap reconnects an hour.
+const FINGER_RETRY: Duration = Duration::from_secs(30);
 
 /// Set in the environment to cross-fade instead of move. See
 /// [`PasswordScreen::set_reduced_motion`].
@@ -175,7 +183,15 @@ fn run() -> Result<()> {
         },
         text: TextRenderer::new(),
         daemon,
+        qh: qh.clone(),
+        finger: None,
+        finger_prompts: 0,
+        unlocking: false,
     };
+    // Straight away, before the compositor has even confirmed the lock: the
+    // reader is slower to answer than the surfaces are to appear, and the
+    // first thing somebody does at a locked laptop is often touch it.
+    state.start_finger();
 
     while !state.exit {
         event_loop
@@ -231,6 +247,16 @@ struct Lock {
     screen: PasswordScreen,
     text: TextRenderer,
     daemon: Client,
+    /// For drawing from event-loop callbacks, which are not handed one.
+    qh: QueueHandle<Lock>,
+    /// The reader, watched for this session's owner. Dropped, which cancels
+    /// it, once it has an answer or the screen is going.
+    finger: Option<FingerWatch>,
+    /// Prompts heard from the current watch; the first is the invitation.
+    finger_prompts: u32,
+    /// Accepted, by password or by finger. A second acceptance arriving in
+    /// the meantime must not arm a second timer.
+    unlocking: bool,
 }
 
 impl std::fmt::Debug for Lock {
@@ -360,33 +386,120 @@ impl Lock {
         });
     }
 
+    /// Watch the reader, with the events coming back through the event loop.
+    fn start_finger(&mut self) {
+        if self.unlocking {
+            return;
+        }
+        self.finger = None;
+        self.finger_prompts = 0;
+        let Some((watch, events)) = FingerWatch::start() else {
+            return;
+        };
+        let qh = self.qh.clone();
+        let inserted = self
+            .loop_handle
+            .insert_source(events, move |event, _, lock: &mut Lock| {
+                if let ChannelEvent::Msg(event) = event {
+                    lock.on_finger(event, &qh);
+                }
+            });
+        match inserted {
+            Ok(_) => self.finger = Some(watch),
+            Err(e) => tracing::warn!("cannot watch the reader from the event loop: {e}"),
+        }
+    }
+
+    /// Act on something the reader did.
+    fn on_finger(&mut self, event: FingerEvent, qh: &QueueHandle<Self>) {
+        if self.unlocking {
+            return;
+        }
+        match event {
+            FingerEvent::Prompt(text) => {
+                let kind = if self.finger_prompts == 0 {
+                    FingerKind::Waiting
+                } else {
+                    FingerKind::Retry
+                };
+                self.finger_prompts += 1;
+                self.screen.set_finger(Some(FingerPrompt { text, kind }));
+            }
+            FingerEvent::Verified => {
+                tracing::info!("fingerprint accepted");
+                self.screen.set_finger(Some(FingerPrompt {
+                    text: "Fingerprint recognised.".to_string(),
+                    kind: FingerKind::Accepted,
+                }));
+                self.finger = None;
+                self.accept(qh);
+                return;
+            }
+            FingerEvent::Denied(text) => {
+                self.screen.set_finger(None);
+                self.screen.set_message(Some(Message {
+                    text,
+                    kind: MessageKind::Warning,
+                }));
+                self.finger = None;
+            }
+            FingerEvent::Unavailable => {
+                self.screen.set_finger(None);
+                self.finger = None;
+            }
+            FingerEvent::Ended => {
+                self.screen.set_finger(None);
+                self.finger = None;
+                let timer = Timer::from_duration(FINGER_RETRY);
+                if let Err(e) = self
+                    .loop_handle
+                    .insert_source(timer, |_, _, lock: &mut Lock| {
+                        lock.start_finger();
+                        TimeoutAction::Drop
+                    })
+                {
+                    tracing::warn!("cannot schedule another look at the reader: {e}");
+                }
+            }
+        }
+        self.draw_all(qh);
+    }
+
+    /// The owner has proved who they are, by either route. Open the lock on
+    /// screen; the frames finish it, and the timer makes sure of it. See the
+    /// module header.
+    fn accept(&mut self, qh: &QueueHandle<Self>) {
+        if self.unlocking {
+            return;
+        }
+        self.unlocking = true;
+        self.finger = None;
+        self.screen.dismiss();
+        self.draw_all(qh);
+        let timer = Timer::from_duration(UNLOCK_DEADLINE);
+        if let Err(e) = self
+            .loop_handle
+            .insert_source(timer, |_, _, lock: &mut Lock| {
+                if !lock.exit {
+                    tracing::warn!("the screen did not finish leaving in time; unlocking anyway");
+                }
+                lock.finish_unlock();
+                TimeoutAction::Drop
+            })
+        {
+            // No timer means no safety net, and a safety net that cannot be
+            // hung is worth more than the departure: go now.
+            tracing::error!("cannot arm the unlock deadline ({e}); unlocking now");
+            self.finish_unlock();
+        }
+    }
+
     /// Check a password and act on the answer.
     fn submit(&mut self, password: String, qh: &QueueHandle<Self>) {
         match self.daemon.verify(password) {
             Ok(Attempt::Verified) => {
                 tracing::info!("password accepted");
-                // Open the lock on screen; the frames finish it, and the
-                // timer makes sure of it. See the module header.
-                self.screen.dismiss();
-                self.draw_all(qh);
-                let timer = Timer::from_duration(UNLOCK_DEADLINE);
-                if let Err(e) = self
-                    .loop_handle
-                    .insert_source(timer, |_, _, lock: &mut Lock| {
-                        if !lock.exit {
-                            tracing::warn!(
-                                "the screen did not finish leaving in time; unlocking anyway"
-                            );
-                        }
-                        lock.finish_unlock();
-                        TimeoutAction::Drop
-                    })
-                {
-                    // No timer means no safety net, and a safety net that
-                    // cannot be hung is worth more than the departure: go now.
-                    tracing::error!("cannot arm the unlock deadline ({e}); unlocking now");
-                    self.finish_unlock();
-                }
+                self.accept(qh);
             }
             Ok(Attempt::Denied {
                 message,

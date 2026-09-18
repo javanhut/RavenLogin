@@ -231,6 +231,51 @@ impl Authenticator {
     /// The password is borrowed as bytes rather than as a `str` because a
     /// password is not required to be UTF-8 — a keyboard layout that produces
     /// a stray byte should fail to match, not fail to be represented.
+    /// Whether `name` may be let in by something that is not its password --
+    /// a finger the sensor has already matched to it.
+    ///
+    /// Every rule [`Self::authenticate`] applies before it looks at the hash,
+    /// and none of it skipped: a locked or expired account, root under a policy
+    /// that refuses it, a system account. A finger is another way to prove who
+    /// somebody is, not another set of rules about who may come in, so an
+    /// account the password could not open, the finger cannot either.
+    ///
+    /// No timing floor, unlike `authenticate`: the name here is one the
+    /// sensor has already vouched for, so there is nothing to enumerate.
+    pub fn admit(&self, name: &str) -> Result<Outcome, Error> {
+        let today = days_since_epoch()?;
+        let Some(mut account) = passwd::load(&self.passwd_path)?
+            .into_iter()
+            .find(|a| a.name == name)
+        else {
+            return Ok(Outcome::Denied(Denial::NoSuchUser));
+        };
+        if account.uid == 0 && !self.policy.allow_root {
+            return Ok(Outcome::Denied(Denial::RootNotPermitted));
+        }
+        if !account.is_person() && account.uid != 0 {
+            return Ok(Outcome::Denied(Denial::NotAPerson));
+        }
+        let Some(entry) = shadow::find(&self.shadow_path, name)? else {
+            return Ok(Outcome::Denied(Denial::NoSuchUser));
+        };
+        let denial = match shadow::status(&entry, today) {
+            Status::Usable => None,
+            Status::Locked => Some(Denial::Locked),
+            Status::NoPasswordLogin => Some(Denial::NoPasswordLogin),
+            Status::AccountExpired => Some(Denial::AccountExpired),
+            Status::PasswordExpired => Some(Denial::PasswordExpired),
+            Status::MustChangePassword => Some(Denial::MustChangePassword),
+            Status::Passwordless if self.policy.allow_empty_password => None,
+            Status::Passwordless => Some(Denial::PasswordlessNotPermitted),
+        };
+        if let Some(denial) = denial {
+            return Ok(Outcome::Denied(denial));
+        }
+        passwd::attach_groups(std::slice::from_mut(&mut account), &self.group_path);
+        Ok(Outcome::Granted(Box::new(account)))
+    }
+
     pub fn authenticate(&self, name: &str, password: &[u8]) -> Result<Outcome, Error> {
         let today = days_since_epoch()?;
 
@@ -387,6 +432,27 @@ mod tests {
                 assert!(account.groups.contains(&91), "groups were not attached");
             }
             other => panic!("expected a grant, got {other:?}"),
+        }
+    }
+
+    /// A finger opens what the password would, and nothing it would not.
+    #[test]
+    fn admission_without_a_password_keeps_every_other_rule() {
+        let f = fixture(Policy::default(), "");
+        assert!(matches!(
+            f.auth.admit("javan").expect("readable files"),
+            Outcome::Granted(account) if account.groups.contains(&91)
+        ));
+        for (name, denial) in [
+            ("root", Denial::RootNotPermitted),
+            ("svc", Denial::NotAPerson),
+            ("nobodyhere", Denial::NoSuchUser),
+        ] {
+            assert_eq!(
+                f.auth.admit(name).expect("readable files"),
+                Outcome::Denied(denial),
+                "{name}"
+            );
         }
     }
 

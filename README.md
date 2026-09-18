@@ -24,6 +24,20 @@ wrong one for a machine you use. RavenLogin is the password prompt.
 | `raven-greeter` | the login screen: a Wayland client. Runs as `raven-greeter`. |
 | `raven-lock` | the lock screen: the same screen, for a session that already exists. Runs as the person logged in. |
 | `raven-ui` | what both screens are drawn with. A library; no Wayland, no sockets. |
+| `raven-finger-auth` | what `sudo`'s PAM stack runs to take a fingerprint instead of the password. Runs as root, only for an account that turned it on. |
+
+## Fingerprints
+
+Off until the account's owner turns them on, in Settings > Security: enrol a
+finger, then choose whether it logs in, unlocks the screen, approves `sudo`, or
+any of those. Each switch that goes on asks for the password. The password field
+never goes away -- the reader is offered beside it, and after three fingers it
+does not recognise it stops offering itself until the password is used.
+
+The reader is `raven-fprintd`'s (RavenLinux), on a root-only socket; `ravend`
+is the only thing that asks it on anybody's behalf, and decides what a match is
+worth. See `crates/ravend/src/finger.rs`, `crates/raven-finger`, and RavenGUI's
+`docs/fingerprint.md` for the design.
 
 ## The lock screen
 

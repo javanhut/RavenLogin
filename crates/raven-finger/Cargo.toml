@@ -1,0 +1,22 @@
+[package]
+name = "raven-finger"
+description = "Where an account lets a finger stand in for its password, and the client for raven-fprintd's root-only sensor socket. Shared by ravend and the sudo helper."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+raven-greet-proto.workspace = true
+
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+rustix = { workspace = true, features = ["termios"] }
+# The sudo helper turns echo off on the terminal while it waits for a finger,
+# and has to put it back if it is interrupted. Catching the signal is the only
+# way to do that, and signal-hook is the safe way to catch one.
+signal-hook = "0.3"
+
+[lints]
+workspace = true

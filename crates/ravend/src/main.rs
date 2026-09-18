@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod finger;
 mod ratelimit;
 mod session;
 mod verify;
@@ -47,6 +48,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -58,6 +62,11 @@ use crate::ratelimit::RateLimiter;
 
 /// How often the accept loop wakes to check on the children it is supervising.
 const SUPERVISE_POLL: Duration = Duration::from_millis(100);
+
+/// How many greeter connections may be open at once: the one the greeter asks
+/// its questions on, one watching the reader, and room for either to be
+/// replaced while the old one is being torn down.
+const MAX_GREET_CONNECTIONS: usize = 4;
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -342,9 +351,17 @@ fn greet_inner(
 /// looking at a login screen any more and continuing to wait for a connection
 /// would hang forever in front of a black display.
 ///
-/// One connection at a time. The greeter is the only client, so a queue buys
-/// nothing, and handling connections serially means the rate limiter cannot be
-/// raced by opening two sockets at once.
+/// A thread per connection, because the greeter holds two: the one it asks
+/// its questions on, and one that is watching the fingerprint reader while
+/// somebody decides whether to type. The threads are scoped to this call, and
+/// every connection is shut down before it returns, so nothing a greeter
+/// opened outlives the greeter.
+///
+/// Two things keep that from costing the guarantees a single connection gave.
+/// The rate limiter is held for the whole of a password check -- the delay,
+/// the check and the record -- so two sockets cannot race it. And exactly one
+/// connection can win: the first to claim `granted` starts the session, and a
+/// finger that matches a moment after a password was accepted is told so.
 #[allow(clippy::too_many_arguments)]
 fn accept_until_login(
     listener: &UnixListener,
@@ -355,45 +372,102 @@ fn accept_until_login(
     greeter_uid: u32,
     wallpaper: Option<&Path>,
 ) -> Result<Account> {
-    let mut last_sweep = Instant::now();
+    let limiter = Mutex::new(limiter);
+    let granted = AtomicBool::new(false);
+    let live = AtomicUsize::new(0);
+    let open: Mutex<Vec<UnixStream>> = Mutex::new(Vec::new());
+    let (logins, login) = mpsc::channel::<Account>();
 
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                match serve(stream, authenticator, limiter, greeter_uid, wallpaper) {
-                    Ok(Some(account)) => return Ok(account),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!("greeter connection failed: {e:#}"),
+    std::thread::scope(|scope| {
+        let outcome = (|| -> Result<Account> {
+            let mut last_sweep = Instant::now();
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) if live.load(Ordering::SeqCst) >= MAX_GREET_CONNECTIONS => {
+                        tracing::warn!("refusing a greeter connection: too many already open");
+                        drop(stream);
+                    }
+                    Ok((stream, _)) => match stream.try_clone() {
+                        Ok(handle) => {
+                            open.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
+                            live.fetch_add(1, Ordering::SeqCst);
+                            let (limiter, granted, live, logins) =
+                                (&limiter, &granted, &live, logins.clone());
+                            scope.spawn(move || {
+                                match serve(
+                                    stream,
+                                    authenticator,
+                                    limiter,
+                                    granted,
+                                    greeter_uid,
+                                    wallpaper,
+                                ) {
+                                    Ok(Some(account)) => {
+                                        let _ = logins.send(account);
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => tracing::warn!("greeter connection failed: {e:#}"),
+                                }
+                                live.fetch_sub(1, Ordering::SeqCst);
+                            });
+                        }
+                        Err(e) => tracing::warn!("cannot keep a greeter connection: {e}"),
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e).context("cannot accept on the socket"));
+                    }
                 }
+
+                if let Ok(account) = login.try_recv() {
+                    return Ok(account);
+                }
+
+                if let Some(status) = compositor
+                    .try_wait()
+                    .context("cannot check the compositor")?
+                {
+                    anyhow::bail!("the greeter's compositor exited ({status})");
+                }
+                if let Some(status) = ui.try_wait().context("cannot check the greeter UI")? {
+                    anyhow::bail!("the greeter UI exited ({status})");
+                }
+
+                if last_sweep.elapsed() > Duration::from_secs(60) {
+                    limiter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .forget_old(Instant::now());
+                    last_sweep = Instant::now();
+                }
+
+                std::thread::sleep(SUPERVISE_POLL);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(anyhow::Error::new(e).context("cannot accept on the socket")),
-        }
+        })();
 
-        if let Some(status) = compositor
-            .try_wait()
-            .context("cannot check the compositor")?
-        {
-            anyhow::bail!("the greeter's compositor exited ({status})");
+        // Wake every connection thread -- blocked on a read, or on the reader
+        // through a finger watch -- so the scope can end. Their replies are
+        // already sent; what is left is only the waiting.
+        for stream in open.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
-        if let Some(status) = ui.try_wait().context("cannot check the greeter UI")? {
-            anyhow::bail!("the greeter UI exited ({status})");
-        }
+        outcome
+    })
+}
 
-        if last_sweep.elapsed() > Duration::from_secs(60) {
-            limiter.forget_old(Instant::now());
-            last_sweep = Instant::now();
-        }
-
-        std::thread::sleep(SUPERVISE_POLL);
-    }
+/// Take the one login this greeter gets. `false` if another connection has it.
+fn claim(granted: &AtomicBool) -> bool {
+    granted
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }
 
 /// Handle one greeter connection until it closes or somebody logs in.
 fn serve(
     stream: UnixStream,
     authenticator: &Authenticator,
-    limiter: &mut RateLimiter,
+    limiter: &Mutex<&mut RateLimiter>,
+    granted: &AtomicBool,
     greeter_uid: u32,
     wallpaper: Option<&Path>,
 ) -> Result<Option<Account>> {
@@ -427,6 +501,7 @@ fn serve(
         .context("cannot set a write timeout")?;
 
     let mut reader = BufReader::new(stream.try_clone().context("cannot clone the stream")?);
+    let handle = stream.try_clone().context("cannot clone the stream")?;
     let mut writer = BufWriter::new(stream);
 
     loop {
@@ -467,11 +542,53 @@ fn serve(
                 raven_greet_proto::write_message(&mut writer, &Response::Wallpaper { path })?;
             }
 
+            // The connection becomes the watch, and ends with it. The account
+            // has to be one the login screen offers: the list of people, never
+            // root or a system account, whatever name the greeter sends.
+            Request::LoginByFinger { username } => {
+                let offered = authenticator
+                    .people()?
+                    .iter()
+                    .any(|account| account.name == username);
+                if !offered {
+                    tracing::warn!(user = %username, "refused a finger login for an account not offered");
+                    raven_greet_proto::write_message(
+                        &mut writer,
+                        &Response::FingerUnavailable {
+                            reason: "not an account this screen offers".to_string(),
+                        },
+                    )?;
+                    return Ok(None);
+                }
+                let admitted = finger::watch(
+                    &username,
+                    finger::Use::Login,
+                    authenticator,
+                    &handle,
+                    &mut writer,
+                    || claim(granted),
+                );
+                if admitted.is_some() {
+                    limiter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_success(&username);
+                }
+                return Ok(admitted);
+            }
+
             // Not served here, and the refusal is deliberate rather than an
             // oversight: these are the lock screen's, and the lock screen must
             // reach `verify.sock` -- the socket that cannot start a session --
-            // and never this one.
-            Request::Whoami | Request::Verify { .. } => {
+            // and never this one. The finger requests are about the account
+            // that owns a connection, and the greeter's account owns nothing.
+            Request::Whoami
+            | Request::Verify { .. }
+            | Request::WatchFinger
+            | Request::FingerStatus
+            | Request::EnrolFinger { .. }
+            | Request::ForgetFinger { .. }
+            | Request::SetFingerPolicy { .. } => {
                 tracing::warn!("refused a lock-screen request on the greet socket");
                 raven_greet_proto::write_message(
                     &mut writer,
@@ -483,6 +600,10 @@ fn serve(
 
             Request::Authenticate { username, secret } => {
                 let now = Instant::now();
+                // Held for the whole attempt, so that a second connection
+                // cannot slip an attempt in between the throttle being checked
+                // and the failure being recorded.
+                let mut limiter = limiter.lock().unwrap_or_else(|e| e.into_inner());
 
                 // The throttle is checked before the password is, so that a
                 // guessing loop pays the delay whether or not it guessed right.
@@ -504,8 +625,18 @@ fn serve(
                 }
 
                 match authenticator.authenticate(&username, secret.as_bytes()) {
+                    Ok(Outcome::Granted(_)) if !claim(granted) => {
+                        tracing::warn!(user = %username, "authenticated after another login had begun");
+                        raven_greet_proto::write_message(
+                            &mut writer,
+                            &Response::Failed {
+                                message: "Another login is already starting.".to_string(),
+                            },
+                        )?;
+                    }
                     Ok(Outcome::Granted(account)) => {
                         limiter.record_success(&username);
+                        finger::password_succeeded(&username);
                         tracing::info!(user = %username, "authenticated");
                         raven_greet_proto::write_message(
                             &mut writer,
