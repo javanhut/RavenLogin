@@ -58,7 +58,9 @@ use std::time::{Duration, Instant};
 
 use raven_greet_proto::User;
 use raven_ui::canvas::Canvas;
-use raven_ui::screen::{FingerKind, FingerPrompt, Message, MessageKind, PasswordScreen};
+use raven_ui::screen::{
+    Biometric, BiometricKind, BiometricPrompt, Message, MessageKind, PasswordScreen,
+};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::Wallpaper;
 
@@ -115,7 +117,7 @@ pub(crate) fn main(args: &[String]) -> Result<()> {
         .map_or(Some(State::Empty), |s| State::parse(s))
         .context(
             "the state should be one of: empty, typing, denied, caps, busy, throttled, \
-             unlocking, arriving, finger, finger-retry",
+             unlocking, arriving, finger, finger-retry, face, face-retry, both, flash",
         )?;
     if let Some(extra) = positional.get(3) {
         anyhow::bail!("unexpected argument {extra}");
@@ -194,14 +196,69 @@ pub(crate) fn render(
 
     match state {
         State::Empty | State::Typing | State::Arriving => {}
-        State::Finger => screen.set_finger(Some(FingerPrompt {
-            text: "Touch the fingerprint sensor.".to_string(),
-            kind: FingerKind::Waiting,
-        })),
-        State::FingerRetry => screen.set_finger(Some(FingerPrompt {
-            text: "Centre your finger on the sensor.".to_string(),
-            kind: FingerKind::Retry,
-        })),
+        State::Finger => screen.set_biometric(
+            Biometric::Fingerprint,
+            Some(BiometricPrompt {
+                text: "Touch the fingerprint sensor.".to_string(),
+                kind: BiometricKind::Waiting,
+            }),
+        ),
+        State::FingerRetry => screen.set_biometric(
+            Biometric::Fingerprint,
+            Some(BiometricPrompt {
+                text: "Centre your finger on the sensor.".to_string(),
+                kind: BiometricKind::Retry,
+            }),
+        ),
+        State::Face => screen.set_biometric(
+            Biometric::Face,
+            Some(BiometricPrompt {
+                text: "Look at the camera.".to_string(),
+                kind: BiometricKind::Waiting,
+            }),
+        ),
+        State::FaceRetry => screen.set_biometric(
+            Biometric::Face,
+            Some(BiometricPrompt {
+                text: "There is not enough light to see you.".to_string(),
+                kind: BiometricKind::Retry,
+            }),
+        ),
+        // Both sensors at once, which is what a machine with both looks like
+        // and the only state where the rows have to share the space.
+        State::Both => {
+            screen.set_biometric(
+                Biometric::Face,
+                Some(BiometricPrompt {
+                    text: "Look at the camera.".to_string(),
+                    kind: BiometricKind::Waiting,
+                }),
+            );
+            screen.set_biometric(
+                Biometric::Fingerprint,
+                Some(BiometricPrompt {
+                    text: "Touch the fingerprint sensor.".to_string(),
+                    kind: BiometricKind::Waiting,
+                }),
+            );
+        }
+        // Mid-liveness-check: the wash up, the panel holding the field clear
+        // of it. Worth a state of its own because it is the one frame nobody
+        // can screenshot on a running machine -- it is up for 200ms.
+        State::Flash => {
+            screen.set_biometric(
+                Biometric::Face,
+                Some(BiometricPrompt {
+                    text: "Look at the camera.".to_string(),
+                    kind: BiometricKind::Waiting,
+                }),
+            );
+            screen.set_flash(Some(raven_greet_proto::Flash {
+                r: 0x3F,
+                g: 0xE0,
+                b: 0xC8,
+            }));
+        }
         State::CapsLock => screen.set_caps_lock(true),
         State::Busy => {
             let _ = screen.submit(now);
@@ -282,6 +339,14 @@ pub(crate) enum State {
     Finger,
     /// A reading the sensor could not use.
     FingerRetry,
+    /// The camera being watched, beside the password.
+    Face,
+    /// A look the camera could not use.
+    FaceRetry,
+    /// Both sensors offered at once.
+    Both,
+    /// The liveness wash, mid-sequence.
+    Flash,
 }
 
 impl State {
@@ -297,6 +362,10 @@ impl State {
             "arriving" => Some(Self::Arriving),
             "finger" => Some(Self::Finger),
             "finger-retry" => Some(Self::FingerRetry),
+            "face" => Some(Self::Face),
+            "face-retry" => Some(Self::FaceRetry),
+            "both" => Some(Self::Both),
+            "flash" => Some(Self::Flash),
             _ => None,
         }
     }

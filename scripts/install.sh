@@ -88,6 +88,13 @@ echo "ok    installed ravend, raven-greeter, raven-lock and raven-finger-auth in
 install -d -m 0700 /var/lib/raven-login /var/lib/raven-login/fingerprint
 echo "ok    /var/lib/raven-login/fingerprint exists, root-only"
 
+# And where each account's face choices live, for the same reason and with the
+# same mode. Note what is *not* here: the face templates themselves, which are
+# raven-faced's under /var/lib/raven-face. The process that reads /etc/shadow
+# does not also hold the biometrics.
+install -d -m 0700 /var/lib/raven-login/face
+echo "ok    /var/lib/raven-login/face exists, root-only"
+
 # --- config ----------------------------------------------------------------
 #
 # Never overwritten. Every value in it is a default that ravend already has

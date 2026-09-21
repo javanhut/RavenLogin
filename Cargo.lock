@@ -538,6 +538,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "raven-face"
+version = "0.0.1"
+dependencies = [
+ "raven-greet-proto",
+ "serde",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "raven-finger"
 version = "0.0.1"
 dependencies = [
@@ -615,6 +625,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "raven-auth",
+ "raven-face",
  "raven-finger",
  "raven-greet-proto",
  "raven-privdrop",

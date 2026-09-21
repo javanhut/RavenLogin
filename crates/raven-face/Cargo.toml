@@ -1,0 +1,17 @@
+[package]
+name = "raven-face"
+description = "Where an account lets its face stand in for its password, and the client for raven-faced's root-only camera socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+raven-greet-proto.workspace = true
+
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

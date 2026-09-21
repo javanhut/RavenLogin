@@ -46,13 +46,17 @@
 
 mod client;
 mod desktop_config;
+mod face;
 mod finger;
 
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use raven_ui::canvas::Canvas;
-use raven_ui::screen::{Action, FingerKind, FingerPrompt, Message, MessageKind, PasswordScreen};
+use raven_greet_proto::Wash;
+use raven_ui::screen::{
+    Action, Biometric, BiometricKind, BiometricPrompt, Message, MessageKind, PasswordScreen,
+};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::{self, Wallpaper};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, FrameCallbackData};
@@ -79,6 +83,7 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_registry, registry_handlers};
 
 use crate::client::{Attempt, Client};
+use crate::face::{Event as FaceEvent, FaceWatch};
 use crate::finger::{Event as FingerEvent, FingerWatch};
 use smithay_client_toolkit::reexports::calloop::channel::Event as ChannelEvent;
 
@@ -185,12 +190,15 @@ fn run() -> Result<()> {
         qh: qh.clone(),
         finger: None,
         finger_prompts: 0,
+        face: None,
+        face_prompts: 0,
         unlocking: false,
     };
     // Straight away, before the compositor has even confirmed the lock: the
     // reader is slower to answer than the surfaces are to appear, and the
     // first thing somebody does at a locked laptop is often touch it.
     state.start_finger();
+    state.start_face();
 
     while !state.exit {
         event_loop
@@ -266,6 +274,11 @@ struct Lock {
     finger: Option<FingerWatch>,
     /// Prompts heard from the current watch; the first is the invitation.
     finger_prompts: u32,
+    /// The camera, watched the same way and independently: a machine with
+    /// both offers both, and either failing leaves the other alone.
+    face: Option<FaceWatch>,
+    /// As `finger_prompts`.
+    face_prompts: u32,
     /// Accepted, by password or by finger. A second acceptance arriving in
     /// the meantime must not arm a second timer.
     unlocking: bool,
@@ -422,6 +435,99 @@ impl Lock {
         }
     }
 
+    /// Watch the camera, with the events coming back through the event loop.
+    fn start_face(&mut self) {
+        if self.unlocking {
+            return;
+        }
+        self.face = None;
+        self.face_prompts = 0;
+        // A watch that ended mid-sequence must not leave the screen washed.
+        self.screen.set_flash(None);
+        let Some((watch, events)) = FaceWatch::start() else {
+            return;
+        };
+        let qh = self.qh.clone();
+        let inserted = self
+            .loop_handle
+            .insert_source(events, move |event, _, lock: &mut Lock| {
+                if let ChannelEvent::Msg(event) = event {
+                    lock.on_face(event, &qh);
+                }
+            });
+        match inserted {
+            Ok(_) => self.face = Some(watch),
+            Err(e) => tracing::warn!("cannot watch the camera from the event loop: {e}"),
+        }
+    }
+
+    /// Act on something the camera did.
+    fn on_face(&mut self, event: FaceEvent, qh: &QueueHandle<Self>) {
+        if self.unlocking {
+            return;
+        }
+        match event {
+            FaceEvent::Wash(wash) => self.screen.set_flash(match wash {
+                Wash::Colour(colour) => Some(colour),
+                Wash::Off => None,
+            }),
+            FaceEvent::Prompt(text) => {
+                let kind = if self.face_prompts == 0 {
+                    BiometricKind::Waiting
+                } else {
+                    BiometricKind::Retry
+                };
+                self.face_prompts += 1;
+                self.screen
+                    .set_biometric(Biometric::Face, Some(BiometricPrompt { text, kind }));
+            }
+            FaceEvent::Verified => {
+                tracing::info!("face accepted");
+                self.screen.set_flash(None);
+                self.screen.set_biometric(
+                    Biometric::Face,
+                    Some(BiometricPrompt {
+                        text: "Face recognised.".to_string(),
+                        kind: BiometricKind::Accepted,
+                    }),
+                );
+                self.face = None;
+                self.accept(qh);
+                return;
+            }
+            FaceEvent::Denied(text) => {
+                self.screen.set_flash(None);
+                self.screen.set_biometric(Biometric::Face, None);
+                self.screen.set_message(Some(Message {
+                    text,
+                    kind: MessageKind::Warning,
+                }));
+                self.face = None;
+            }
+            FaceEvent::Unavailable => {
+                self.screen.set_flash(None);
+                self.screen.set_biometric(Biometric::Face, None);
+                self.face = None;
+            }
+            FaceEvent::Ended => {
+                self.screen.set_flash(None);
+                self.screen.set_biometric(Biometric::Face, None);
+                self.face = None;
+                let timer = Timer::from_duration(FINGER_RETRY);
+                if let Err(e) = self
+                    .loop_handle
+                    .insert_source(timer, |_, _, lock: &mut Lock| {
+                        lock.start_face();
+                        TimeoutAction::Drop
+                    })
+                {
+                    tracing::warn!("cannot schedule another look at the camera: {e}");
+                }
+            }
+        }
+        self.draw_all(qh);
+    }
+
     /// Act on something the reader did.
     fn on_finger(&mut self, event: FingerEvent, qh: &QueueHandle<Self>) {
         if self.unlocking {
@@ -430,25 +536,29 @@ impl Lock {
         match event {
             FingerEvent::Prompt(text) => {
                 let kind = if self.finger_prompts == 0 {
-                    FingerKind::Waiting
+                    BiometricKind::Waiting
                 } else {
-                    FingerKind::Retry
+                    BiometricKind::Retry
                 };
                 self.finger_prompts += 1;
-                self.screen.set_finger(Some(FingerPrompt { text, kind }));
+                self.screen
+                    .set_biometric(Biometric::Fingerprint, Some(BiometricPrompt { text, kind }));
             }
             FingerEvent::Verified => {
                 tracing::info!("fingerprint accepted");
-                self.screen.set_finger(Some(FingerPrompt {
-                    text: "Fingerprint recognised.".to_string(),
-                    kind: FingerKind::Accepted,
-                }));
+                self.screen.set_biometric(
+                    Biometric::Fingerprint,
+                    Some(BiometricPrompt {
+                        text: "Fingerprint recognised.".to_string(),
+                        kind: BiometricKind::Accepted,
+                    }),
+                );
                 self.finger = None;
                 self.accept(qh);
                 return;
             }
             FingerEvent::Denied(text) => {
-                self.screen.set_finger(None);
+                self.screen.set_biometric(Biometric::Fingerprint, None);
                 self.screen.set_message(Some(Message {
                     text,
                     kind: MessageKind::Warning,
@@ -456,11 +566,11 @@ impl Lock {
                 self.finger = None;
             }
             FingerEvent::Unavailable => {
-                self.screen.set_finger(None);
+                self.screen.set_biometric(Biometric::Fingerprint, None);
                 self.finger = None;
             }
             FingerEvent::Ended => {
-                self.screen.set_finger(None);
+                self.screen.set_biometric(Biometric::Fingerprint, None);
                 self.finger = None;
                 let timer = Timer::from_duration(FINGER_RETRY);
                 if let Err(e) = self
@@ -486,6 +596,8 @@ impl Lock {
         }
         self.unlocking = true;
         self.finger = None;
+        self.face = None;
+        self.screen.set_flash(None);
         self.screen.dismiss();
         self.draw_all(qh);
         let timer = Timer::from_duration(UNLOCK_DEADLINE);

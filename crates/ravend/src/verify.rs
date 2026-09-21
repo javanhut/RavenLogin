@@ -47,7 +47,9 @@ use anyhow::{Context, Result};
 use raven_auth::{Account, Authenticator, Denial, Outcome};
 use raven_greet_proto::{Request, Response, Secret, User, VERIFY_SOCKET_PATH};
 
-use crate::finger::{self, Use};
+use crate::bio::{self, Use};
+use crate::face;
+use crate::finger;
 use crate::ratelimit::{Limits, RateLimiter};
 
 /// How long a connection may sit silent before it is dropped.
@@ -241,6 +243,25 @@ fn serve(
                 }
                 return Ok(());
             }
+            Request::WatchFace { flash } => {
+                if face::watch(
+                    &account.name,
+                    Use::Unlock,
+                    flash,
+                    authenticator,
+                    &handle,
+                    &mut writer,
+                    || true,
+                )
+                .is_some()
+                {
+                    limiter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_success(&account.name);
+                }
+                return Ok(());
+            }
             // The password first, through the same throttle as an unlock:
             // enrolling a finger is a way in, and only the account's owner may
             // add one.
@@ -253,6 +274,19 @@ fn serve(
                     refused => raven_greet_proto::write_message(&mut writer, &refused)?,
                 }
             }
+            // As `EnrolFinger`, and for the same reason: a face somebody
+            // enrols is a way in, so the password comes first.
+            Request::EnrolFace {
+                label,
+                flash,
+                secret,
+            } => match verify(&account, secret.as_bytes(), authenticator, limiter) {
+                Response::Verified => {
+                    face::enrol(&account.name, &label, flash, &handle, &mut writer);
+                    return Ok(());
+                }
+                refused => raven_greet_proto::write_message(&mut writer, &refused)?,
+            },
             request => {
                 let response = answer(request, &account, authenticator, limiter);
                 raven_greet_proto::write_message(&mut writer, &response)?;
@@ -298,18 +332,36 @@ fn answer(
             finger::set_policy(&account.name, policy)
         }
 
+        Request::FaceStatus => face::status(&account.name),
+        Request::ForgetFace { look } => face::forget(&account.name, look),
+        Request::SetFacePolicy { policy, secret } => {
+            let current = raven_face::policy::load(&account.name);
+            // As for a finger: switching a use on takes the password,
+            // switching one off never does.
+            if current.widened_by(policy) {
+                match password_for_change(account, secret.as_ref(), authenticator, limiter) {
+                    Response::Verified => {}
+                    refused => return refused,
+                }
+            }
+            face::set_policy(&account.name, policy)
+        }
+
         // Streaming requests, handled in `serve` before this is reached. Here
         // only so the match is total.
-        Request::WatchFinger | Request::EnrolFinger { .. } => Response::Failed {
+        Request::WatchFinger
+        | Request::EnrolFinger { .. }
+        | Request::WatchFace { .. }
+        | Request::EnrolFace { .. } => Response::Failed {
             message: "This request needs the connection to itself.".to_string(),
         },
 
         // The login screen's, on the login screen's socket. On this one it
         // would let a session watch the reader for somebody else's finger.
-        Request::LoginByFinger { .. } => {
+        Request::LoginByFinger { .. } | Request::LoginByFace { .. } => {
             tracing::warn!(
                 user = %account.name,
-                "refused a login-by-finger request on the verify socket"
+                "refused a biometric login request on the verify socket"
             );
             Response::Failed {
                 message: "This socket does not start sessions.".to_string(),
@@ -384,7 +436,7 @@ fn verify(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .record_success(&account.name);
-            finger::password_succeeded(&account.name);
+            bio::password_succeeded(&account.name);
             tracing::info!(user = %account.name, "password accepted");
             Response::Verified
         }
@@ -531,6 +583,49 @@ mod tests {
             matches!(response, Response::Denied { .. }),
             "got {response:?}"
         );
+    }
+
+    /// The same refusal for a face. A session that could name an account
+    /// here could wait for somebody else to walk past the camera.
+    #[test]
+    fn a_face_login_is_refused_here() {
+        let authenticator = Authenticator::new(Default::default());
+        let response = answer(
+            Request::LoginByFace {
+                username: "somebody".to_string(),
+                flash: true,
+            },
+            &account(),
+            &authenticator,
+            &limiter(),
+        );
+        assert!(
+            matches!(response, Response::Failed { .. }),
+            "got {response:?}"
+        );
+    }
+
+    /// The streaming requests must not be answered by `answer`: reaching it
+    /// means `serve` did not take them, and a watch answered with one message
+    /// is a watch that never happened.
+    #[test]
+    fn the_streaming_requests_are_not_answered_in_one_message() {
+        let authenticator = Authenticator::new(Default::default());
+        for request in [
+            Request::WatchFinger,
+            Request::WatchFace { flash: true },
+            Request::EnrolFace {
+                label: String::new(),
+                flash: true,
+                secret: Secret::new("x".to_string()),
+            },
+        ] {
+            let response = answer(request, &account(), &authenticator, &limiter());
+            assert!(
+                matches!(response, Response::Failed { .. }),
+                "got {response:?}"
+            );
+        }
     }
 
     #[test]

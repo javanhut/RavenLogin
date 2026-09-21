@@ -38,6 +38,8 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod bio;
+mod face;
 mod finger;
 mod ratelimit;
 mod session;
@@ -562,7 +564,43 @@ fn serve(
                 }
                 let admitted = finger::watch(
                     &username,
-                    finger::Use::Login,
+                    bio::Use::Login,
+                    authenticator,
+                    &handle,
+                    &mut writer,
+                    || claim(granted),
+                );
+                if admitted.is_some() {
+                    limiter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_success(&username);
+                }
+                return Ok(admitted);
+            }
+
+            // The same shape as `LoginByFinger`, with one extra field: the
+            // greeter's claim that it will run the liveness challenge. It is
+            // passed through and tested by `raven-faced`, never believed here.
+            Request::LoginByFace { username, flash } => {
+                let offered = authenticator
+                    .people()?
+                    .iter()
+                    .any(|account| account.name == username);
+                if !offered {
+                    tracing::warn!(user = %username, "refused a face login for an account not offered");
+                    raven_greet_proto::write_message(
+                        &mut writer,
+                        &Response::FaceUnavailable {
+                            reason: "not an account this screen offers".to_string(),
+                        },
+                    )?;
+                    return Ok(None);
+                }
+                let admitted = face::watch(
+                    &username,
+                    bio::Use::Login,
+                    flash,
                     authenticator,
                     &handle,
                     &mut writer,
@@ -588,7 +626,12 @@ fn serve(
             | Request::FingerStatus
             | Request::EnrolFinger { .. }
             | Request::ForgetFinger { .. }
-            | Request::SetFingerPolicy { .. } => {
+            | Request::SetFingerPolicy { .. }
+            | Request::WatchFace { .. }
+            | Request::FaceStatus
+            | Request::EnrolFace { .. }
+            | Request::ForgetFace { .. }
+            | Request::SetFacePolicy { .. } => {
                 tracing::warn!("refused a lock-screen request on the greet socket");
                 raven_greet_proto::write_message(
                     &mut writer,
@@ -636,7 +679,7 @@ fn serve(
                     }
                     Ok(Outcome::Granted(account)) => {
                         limiter.record_success(&username);
-                        finger::password_succeeded(&username);
+                        bio::password_succeeded(&username);
                         tracing::info!(user = %username, "authenticated");
                         raven_greet_proto::write_message(
                             &mut writer,

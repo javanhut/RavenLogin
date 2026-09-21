@@ -6,6 +6,7 @@ members = [
     "crates/raven-auth",
     "crates/raven-greet-proto",
     "crates/raven-finger",
+    "crates/raven-face",
     "crates/raven-ui",
     "crates/ravend",
     "crates/raven-greeter",
@@ -45,6 +46,7 @@ raven-privdrop = { path = "crates/raven-privdrop" }
 raven-auth = { path = "crates/raven-auth" }
 raven-greet-proto = { path = "crates/raven-greet-proto" }
 raven-finger = { path = "crates/raven-finger" }
+raven-face = { path = "crates/raven-face" }
 raven-ui = { path = "crates/raven-ui" }
 
 # The hash primitive, and nothing else from RustCrypto: sha512-crypt is

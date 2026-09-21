@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 mod client;
+mod face;
 mod finger;
 mod preview;
 
@@ -58,11 +59,14 @@ use smithay_client_toolkit::reexports::client::protocol::{
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 
 use raven_ui::canvas::Canvas;
-use raven_ui::screen::{Action, FingerKind, FingerPrompt, Message, MessageKind, PasswordScreen};
+use raven_ui::screen::{
+    Action, Biometric, BiometricKind, BiometricPrompt, Message, MessageKind, PasswordScreen,
+};
 use raven_ui::text::TextRenderer;
 use raven_ui::wallpaper::{self, Wallpaper};
 
 use crate::client::{Attempt, Client};
+use crate::face::{Event as FaceEvent, FaceWatch};
 use crate::finger::{Event as FingerEvent, FingerWatch};
 
 fn main() -> std::process::ExitCode {
@@ -187,11 +191,14 @@ fn run() -> Result<()> {
         daemon,
         finger: None,
         finger_prompts: 0,
+        face: None,
+        face_prompts: 0,
     };
     // Offered from the first frame, for whoever is selected. If the account
     // has no finger to offer, or the machine has no reader, the daemon says so
     // a moment later and nothing about the screen changes.
     greeter.watch_finger();
+    greeter.watch_face();
 
     while !greeter.exit {
         queue
@@ -231,6 +238,12 @@ struct Greeter {
     /// Prompts heard from the current watch: the first is the invitation,
     /// the rest are corrections and are shown as such.
     finger_prompts: u32,
+    /// The camera, watched for the selected account. The reader's twin in
+    /// every respect, and independent of it: a machine with both offers both,
+    /// and either one failing leaves the other alone.
+    face: Option<FaceWatch>,
+    /// As `finger_prompts`.
+    face_prompts: u32,
 }
 
 impl std::fmt::Debug for Greeter {
@@ -261,8 +274,91 @@ impl Greeter {
         // account before it is asked to watch for this one.
         self.finger = None;
         self.finger_prompts = 0;
-        self.screen.set_finger(None);
+        self.screen.set_biometric(Biometric::Fingerprint, None);
         self.finger = FingerWatch::start(&user);
+    }
+
+    /// Watch the camera for whoever is selected, if that is not already who
+    /// it is being watched for.
+    fn watch_face(&mut self) {
+        let Some(user) = self.screen.current().map(|u| u.name.clone()) else {
+            return;
+        };
+        if self.face.as_ref().is_some_and(|w| w.username() == user) {
+            return;
+        }
+        // Dropped first, so the daemon has put the camera down for the last
+        // account before it is asked to watch for this one.
+        self.face = None;
+        self.face_prompts = 0;
+        self.screen.set_biometric(Biometric::Face, None);
+        // And the wash with it: a watch that ends mid-sequence must not leave
+        // the screen green.
+        self.screen.set_flash(None);
+        self.face = FaceWatch::start(&user);
+    }
+
+    /// Act on whatever the camera has done since the last frame.
+    fn poll_face(&mut self) {
+        let Some(watch) = &self.face else {
+            return;
+        };
+        for event in watch.drain() {
+            match event {
+                FaceEvent::Wash(wash) => self.screen.set_flash(match wash {
+                    raven_greet_proto::Wash::Colour(colour) => Some(colour),
+                    raven_greet_proto::Wash::Off => None,
+                }),
+                FaceEvent::Prompt(text) => {
+                    let kind = if self.face_prompts == 0 {
+                        BiometricKind::Waiting
+                    } else {
+                        BiometricKind::Retry
+                    };
+                    self.face_prompts += 1;
+                    self.screen
+                        .set_biometric(Biometric::Face, Some(BiometricPrompt { text, kind }));
+                }
+                FaceEvent::Granted => {
+                    // The daemon has already started the session, exactly as
+                    // for a password; this is the same departure.
+                    tracing::info!("granted by face");
+                    self.screen.set_flash(None);
+                    self.screen.set_biometric(
+                        Biometric::Face,
+                        Some(BiometricPrompt {
+                            text: "Face recognised.".to_string(),
+                            kind: BiometricKind::Accepted,
+                        }),
+                    );
+                    self.screen.set_message(Some(Message {
+                        text: "Welcome back.".to_string(),
+                        kind: MessageKind::Success,
+                    }));
+                    self.screen.dismiss();
+                    self.face = None;
+                    return;
+                }
+                FaceEvent::Denied(text) => {
+                    // A warning, not an error: nothing was typed wrong, and
+                    // the field has been waiting the whole time.
+                    self.screen.set_flash(None);
+                    self.screen.set_biometric(Biometric::Face, None);
+                    self.screen.set_message(Some(Message {
+                        text,
+                        kind: MessageKind::Warning,
+                    }));
+                    self.face = None;
+                    return;
+                }
+                FaceEvent::Ended => {
+                    self.screen.set_flash(None);
+                    self.screen.set_biometric(Biometric::Face, None);
+                    self.face = None;
+                    return;
+                }
+            }
+        }
     }
 
     /// Act on whatever the reader has done since the last frame.
@@ -274,33 +370,39 @@ impl Greeter {
             match event {
                 FingerEvent::Prompt(text) => {
                     let kind = if self.finger_prompts == 0 {
-                        FingerKind::Waiting
+                        BiometricKind::Waiting
                     } else {
-                        FingerKind::Retry
+                        BiometricKind::Retry
                     };
                     self.finger_prompts += 1;
-                    self.screen.set_finger(Some(FingerPrompt { text, kind }));
+                    self.screen
+                        .set_biometric(Biometric::Fingerprint, Some(BiometricPrompt { text, kind }));
                 }
                 FingerEvent::Granted => {
                     // The daemon has already started the session, exactly as
                     // for a password; this is the same departure.
                     tracing::info!("granted by fingerprint");
-                    self.screen.set_finger(Some(FingerPrompt {
-                        text: "Fingerprint recognised.".to_string(),
-                        kind: FingerKind::Accepted,
-                    }));
+                    self.screen.set_biometric(
+                        Biometric::Fingerprint,
+                        Some(BiometricPrompt {
+                            text: "Fingerprint recognised.".to_string(),
+                            kind: BiometricKind::Accepted,
+                        }),
+                    );
                     self.screen.set_message(Some(Message {
                         text: "Welcome back.".to_string(),
                         kind: MessageKind::Success,
                     }));
                     self.screen.dismiss();
                     self.finger = None;
+                self.face = None;
+                self.screen.set_flash(None);
                     return;
                 }
                 FingerEvent::Denied(text) => {
                     // A warning, not an error: nothing was typed wrong, and
                     // the field has been waiting the whole time.
-                    self.screen.set_finger(None);
+                    self.screen.set_biometric(Biometric::Fingerprint, None);
                     self.screen.set_message(Some(Message {
                         text,
                         kind: MessageKind::Warning,
@@ -309,7 +411,7 @@ impl Greeter {
                     return;
                 }
                 FingerEvent::Ended => {
-                    self.screen.set_finger(None);
+                    self.screen.set_biometric(Biometric::Fingerprint, None);
                     self.finger = None;
                     return;
                 }
@@ -319,6 +421,7 @@ impl Greeter {
 
     /// Render one frame and request the next.
     fn draw(&mut self, qh: &QueueHandle<Self>) {
+        self.poll_face();
         self.poll_finger();
         if self.width == 0 || self.height == 0 {
             return;
@@ -601,10 +704,12 @@ impl Greeter {
             Key::NextUser => {
                 self.screen.next_user();
                 self.watch_finger();
+                self.watch_face();
             }
             Key::PreviousUser => {
                 self.screen.previous_user();
                 self.watch_finger();
+                self.watch_face();
             }
             Key::Text(text) => {
                 for c in text.chars() {

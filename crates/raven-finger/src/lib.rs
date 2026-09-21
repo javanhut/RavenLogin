@@ -49,21 +49,11 @@ pub fn advice(word: &str) -> &'static str {
     }
 }
 
-/// Whether `name` is safe to use as a file name and a record prefix.
-///
-/// Account names come from `/etc/passwd`, which is root's, so this is not the
-/// only line of defence -- but a name with a `/` in it would be a path, and one
-/// with a `:` in it would make a sensor record ambiguous about where the
-/// account ends and the finger begins.
-#[must_use]
-pub fn valid_account(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with(['.', '-'])
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'$'))
-}
+/// Re-exported: the rule now lives in `raven-greet-proto`, because
+/// `raven-face` needs the same one and a second copy of it is a second thing
+/// to get wrong.
+pub use raven_greet_proto::valid_account;
+
 
 #[cfg(test)]
 mod tests {
@@ -75,14 +65,5 @@ mod tests {
             assert!(advice(word).ends_with('.'));
         }
         assert_ne!(advice("centre"), advice("cover"));
-    }
-
-    #[test]
-    fn account_names_that_would_be_paths_are_refused() {
-        assert!(valid_account("javanstorm"));
-        assert!(valid_account("a.b-c_d"));
-        for bad in ["", "../root", "a/b", ".hidden", "-rf", "a:b", "a b"] {
-            assert!(!valid_account(bad), "{bad:?} must be refused");
-        }
     }
 }

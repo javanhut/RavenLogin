@@ -28,86 +28,16 @@
 //!
 //! [`Request::LoginByFinger`]: raven_greet_proto::Request::LoginByFinger
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use raven_auth::{Account, Authenticator, Denial, Outcome};
+use raven_auth::{Account, Authenticator};
+use raven_finger::policy;
 use raven_finger::sensor::{Sensor, Watch, WatchEvent};
-use raven_finger::{MAX_MISSES, policy};
 use raven_greet_proto::{Finger, FingerPolicy, Reader, Response};
 
-/// What a watch is for, which decides the policy switch it needs and what a
-/// match turns into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Use {
-    /// The login screen: a match starts a session.
-    Login,
-    /// The lock screen: a match lets the session back in.
-    Unlock,
-}
-
-impl Use {
-    fn allowed_by(self, policy: FingerPolicy) -> bool {
-        match self {
-            Self::Login => policy.login,
-            Self::Unlock => policy.unlock,
-        }
-    }
-}
-
-/// How long a spent budget of misses lasts, if the password does not reset it
-/// first. The same fifteen minutes the password throttle forgets after.
-const STRIKES_LAST: Duration = Duration::from_secs(15 * 60);
-
-/// Clean misses per account, across watches and across both screens.
-///
-/// [`Sensor::watch`] stops after [`MAX_MISSES`], but a client could simply
-/// start another watch. So the count lives here, and a new watch gets only
-/// what is left of it. It is not a lockout: the password field is on screen
-/// the whole time, and a right password clears the count.
-#[derive(Debug, Default)]
-struct Strikes {
-    counts: HashMap<String, (u8, Instant)>,
-}
-
-impl Strikes {
-    fn left(&mut self, account: &str, now: Instant) -> u8 {
-        match self.counts.get(account) {
-            Some((_, at)) if now.duration_since(*at) > STRIKES_LAST => {
-                self.counts.remove(account);
-                MAX_MISSES
-            }
-            Some((count, _)) => MAX_MISSES.saturating_sub(*count),
-            None => MAX_MISSES,
-        }
-    }
-
-    fn miss(&mut self, account: &str, now: Instant) {
-        let entry = self.counts.entry(account.to_string()).or_insert((0, now));
-        entry.0 = entry.0.saturating_add(1);
-        entry.1 = now;
-    }
-
-    fn clear(&mut self, account: &str) {
-        self.counts.remove(account);
-    }
-}
-
-static STRIKES: LazyLock<Mutex<Strikes>> = LazyLock::new(Mutex::default);
-
-fn strikes() -> std::sync::MutexGuard<'static, Strikes> {
-    STRIKES.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// A right password resets the finger budget, as it resets the password
-/// throttle. Called from both sockets' password paths.
-pub(crate) fn password_succeeded(account: &str) {
-    strikes().clear(account);
-}
+use crate::bio::{self, Follow, Use, send};
 
 /// How long the calls that answer at once may wait on `raven-fprintd`.
 ///
@@ -256,66 +186,6 @@ pub(crate) fn set_policy(account: &str, next: FingerPolicy) -> Response {
     status(account)
 }
 
-/// Whoever is on the far end of a watch, followed from another thread.
-///
-/// Set up once per watch, before any sensor exists, because a watch can now
-/// spend a while waiting for the reader to come back -- and a client that
-/// hangs up during that wait must end it just as it ends one in progress.
-struct Follow {
-    /// The client went first: a cancelled watch, not a daemon that died.
-    gone: Arc<AtomicBool>,
-    /// The sensor connection to hang up on when it does. Replaced each time
-    /// the watch reconnects.
-    hangup: Arc<Mutex<Option<UnixStream>>>,
-}
-
-impl Follow {
-    fn is_gone(&self) -> bool {
-        self.gone.load(Ordering::SeqCst)
-    }
-
-    /// Point the hang-up at `sensor`. `false` if the client has already gone,
-    /// in which case the sensor is not worth using.
-    fn attach(&self, sensor: &Sensor) -> std::io::Result<bool> {
-        let handle = sensor.hangup_handle()?;
-        *self.hangup.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
-        // Checked after storing, so a hang-up racing this either sees the
-        // handle and shuts it or is seen here.
-        Ok(!self.is_gone())
-    }
-}
-
-/// Hang up on `raven-fprintd` when the client hangs up on us.
-fn follow_client(client: &UnixStream) -> std::io::Result<Follow> {
-    let mut client = client.try_clone()?;
-    let follow = Follow {
-        gone: Arc::new(AtomicBool::new(false)),
-        hangup: Arc::new(Mutex::new(None)),
-    };
-    let (flag, slot) = (Arc::clone(&follow.gone), Arc::clone(&follow.hangup));
-    std::thread::Builder::new()
-        .name("finger-hangup".to_string())
-        .spawn(move || {
-            // Nothing is expected from the client mid-watch. Anything at all
-            // -- a byte, a close, a timeout -- ends it.
-            let mut byte = [0u8; 1];
-            let _ = client.read(&mut byte);
-            flag.store(true, Ordering::SeqCst);
-            if let Some(hangup) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                let _ = hangup.shutdown(std::net::Shutdown::Both);
-            }
-        })?;
-    Ok(follow)
-}
-
-/// Send one response; a client that has gone is not an error worth more than
-/// a debug line, because the watch is about to notice the same thing.
-fn send<W: Write>(writer: &mut W, response: &Response) {
-    if let Err(e) = raven_greet_proto::write_message(writer, response) {
-        tracing::debug!("cannot write to a finger client: {e}");
-    }
-}
-
 fn finger(message: &str) -> Response {
     Response::Finger {
         message: message.to_string(),
@@ -428,14 +298,14 @@ fn watch_inner<W: Write>(
     writer: &mut W,
     claim: impl FnOnce() -> bool,
 ) -> Option<Account> {
-    if !purpose.allowed_by(policy::load(account)) {
+    if !purpose.allowed_by_finger(policy::load(account)) {
         send(
             writer,
             &unavailable("fingerprint is not turned on for this"),
         );
         return None;
     }
-    let follow = match follow_client(client) {
+    let follow = match bio::follow_client(client, "finger-hangup") {
         Ok(follow) => follow,
         Err(e) => {
             tracing::warn!("cannot follow the finger client: {e}");
@@ -449,7 +319,7 @@ fn watch_inner<W: Write>(
 
     let mut rebinds: u8 = 0;
     loop {
-        let allowed = strikes().left(account, Instant::now());
+        let allowed = bio::finger_strikes().left(account, Instant::now());
         if allowed == 0 {
             send(
                 writer,
@@ -477,9 +347,12 @@ fn watch_inner<W: Write>(
             );
             return None;
         }
-        match follow.attach(&sensor) {
-            Ok(true) => {}
-            Ok(false) => return None,
+        match sensor.hangup_handle() {
+            Ok(hangup) => {
+                if !follow.attach(hangup) {
+                    return None;
+                }
+            }
             Err(e) => {
                 tracing::warn!("cannot follow the finger client: {e}");
                 send(
@@ -497,17 +370,25 @@ fn watch_inner<W: Write>(
         let verdict = sensor.watch(account, allowed, |event| match event {
             WatchEvent::Retry(advice) => send(writer, &finger(advice)),
             WatchEvent::Miss { .. } => {
-                strikes().miss(account, Instant::now());
+                bio::finger_strikes().miss(account, Instant::now());
                 send(writer, &finger("Not recognised. Try again."));
             }
         });
 
         match verdict {
             Ok(Watch::Matched(which)) => {
-                return admit(account, which, purpose, authenticator, writer, claim);
+                return bio::admit(
+                    account,
+                    purpose,
+                    which.map_or("an unnamed finger", Finger::as_str),
+                    bio::finger_strikes,
+                    authenticator,
+                    writer,
+                    claim,
+                );
             }
             Ok(Watch::Missed) => {
-                strikes().miss(account, Instant::now());
+                bio::finger_strikes().miss(account, Instant::now());
                 tracing::warn!(user = %account, ?purpose, "fingerprint not recognised; watch over");
                 send(
                     writer,
@@ -544,74 +425,6 @@ fn watch_inner<W: Write>(
                 }
                 tracing::info!(user = %account, "reconnecting to the reader");
             }
-        }
-    }
-}
-
-/// A match, and the account's own. It still has to be an account that may
-/// come in: a locked or expired one is refused here exactly as its password
-/// would have been.
-fn admit<W: Write>(
-    account: &str,
-    which: Option<Finger>,
-    purpose: Use,
-    authenticator: &Authenticator,
-    writer: &mut W,
-    claim: impl FnOnce() -> bool,
-) -> Option<Account> {
-    match authenticator.admit(account) {
-        Ok(Outcome::Granted(_)) if !claim() => {
-            tracing::warn!(user = %account, "fingerprint matched after another login had begun");
-            send(
-                writer,
-                &Response::Failed {
-                    message: "Another login is already starting.".to_string(),
-                },
-            );
-            None
-        }
-        Ok(Outcome::Granted(admitted)) => {
-            strikes().clear(account);
-            tracing::info!(
-                user = %account,
-                finger = which.map_or("unnamed", Finger::as_str),
-                ?purpose,
-                "fingerprint accepted"
-            );
-            let response = match purpose {
-                Use::Login => Response::Granted {
-                    username: account.to_string(),
-                },
-                Use::Unlock => Response::Verified,
-            };
-            send(writer, &response);
-            Some(*admitted)
-        }
-        Ok(Outcome::Denied(denial)) => {
-            tracing::warn!(user = %account, ?denial, "fingerprint matched but the account is refused");
-            let message = if denial.is_safe_to_display() {
-                denial.message()
-            } else {
-                Denial::BadPassword.message()
-            };
-            send(
-                writer,
-                &Response::Denied {
-                    message,
-                    retry_after_ms: 0,
-                },
-            );
-            None
-        }
-        Err(e) => {
-            tracing::error!("cannot read the account database: {e:#}");
-            send(
-                writer,
-                &Response::Failed {
-                    message: "This machine's account database cannot be read.".to_string(),
-                },
-            );
-            None
         }
     }
 }
@@ -656,13 +469,16 @@ fn enrol_inner<W: Write>(account: &str, which: Finger, client: &UnixStream, writ
     if sensor.set_read_timeout(None).is_err() {
         return failed(writer, "The fingerprint reader is not answering.");
     }
-    let follow = match follow_client(client) {
+    let follow = match bio::follow_client(client, "finger-hangup") {
         Ok(follow) => follow,
         Err(_) => return failed(writer, "The login service is short of resources."),
     };
-    match follow.attach(&sensor) {
-        Ok(true) => {}
-        Ok(false) => return,
+    match sensor.hangup_handle() {
+        Ok(hangup) => {
+            if !follow.attach(hangup) {
+                return;
+            }
+        }
         Err(_) => return failed(writer, "The login service is short of resources."),
     }
 
@@ -712,54 +528,5 @@ fn enrol_inner<W: Write>(account: &str, which: Finger, client: &UnixStream, writ
             }
             failed(writer, &format!("{why}."));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strikes_are_shared_across_watches_and_reset_by_a_password() {
-        let mut s = Strikes::default();
-        let now = Instant::now();
-        assert_eq!(s.left("javan", now), MAX_MISSES);
-        s.miss("javan", now);
-        s.miss("javan", now);
-        assert_eq!(
-            s.left("javan", now),
-            MAX_MISSES - 2,
-            "a new watch gets what is left"
-        );
-        assert_eq!(s.left("other", now), MAX_MISSES, "per account");
-        s.miss("javan", now);
-        assert_eq!(s.left("javan", now), 0);
-        s.clear("javan");
-        assert_eq!(s.left("javan", now), MAX_MISSES);
-    }
-
-    #[test]
-    fn a_spent_budget_comes_back_on_its_own() {
-        let mut s = Strikes::default();
-        let then = Instant::now();
-        for _ in 0..MAX_MISSES {
-            s.miss("javan", then);
-        }
-        assert_eq!(s.left("javan", then), 0);
-        assert_eq!(
-            s.left("javan", then + STRIKES_LAST + Duration::from_secs(1)),
-            MAX_MISSES
-        );
-    }
-
-    #[test]
-    fn each_screen_needs_its_own_switch() {
-        let unlock_only = FingerPolicy {
-            unlock: true,
-            ..FingerPolicy::default()
-        };
-        assert!(Use::Unlock.allowed_by(unlock_only));
-        assert!(!Use::Login.allowed_by(unlock_only));
-        assert!(!Use::Unlock.allowed_by(FingerPolicy::default()));
     }
 }

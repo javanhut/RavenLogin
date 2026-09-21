@@ -10,6 +10,7 @@ license.workspace = true
 raven-auth.workspace = true
 raven-greet-proto.workspace = true
 raven-finger.workspace = true
+raven-face.workspace = true
 raven-privdrop.workspace = true
 
 anyhow.workspace = true

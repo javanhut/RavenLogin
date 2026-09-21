@@ -38,7 +38,7 @@
 
 use std::time::{Duration, Instant};
 
-use raven_greet_proto::User;
+use raven_greet_proto::{Flash, User};
 
 use crate::canvas::{Backdrop, Canvas, Rect};
 use crate::motion::{Motion, Spring};
@@ -143,21 +143,48 @@ impl MessageKind {
     }
 }
 
-/// What the fingerprint reader is doing, shown under the field.
+/// A sensor that can be offered instead of typing.
+///
+/// Two of them, each with its own row under the field, because a machine may
+/// have both and neither is a fallback for the other: a reader that will not
+/// read and a camera that cannot see fail for unrelated reasons, and hiding
+/// one behind the other would mean somebody with a wet thumb in a dark room
+/// being told about only whichever the screen picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Biometric {
+    /// The camera, drawn above the reader: it is the one that needs somebody
+    /// to be looking at the screen, so it goes where they are looking.
+    Face,
+    Fingerprint,
+}
+
+impl Biometric {
+    /// Both, in the order their rows are drawn.
+    pub const ALL: [Self; 2] = [Self::Face, Self::Fingerprint];
+
+    const fn row(self) -> usize {
+        match self {
+            Self::Face => 0,
+            Self::Fingerprint => 1,
+        }
+    }
+}
+
+/// What a sensor is doing, shown under the field.
 ///
 /// Beside the password, never instead of it: the field stays focused and
-/// typeable the whole time this is showing, because a reader that has stopped
+/// typeable the whole time this is showing, because a sensor that has stopped
 /// working must be something somebody can ignore rather than something they
 /// have to get past.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FingerPrompt {
+pub struct BiometricPrompt {
     pub text: String,
-    pub kind: FingerKind,
+    pub kind: BiometricKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FingerKind {
-    /// Waiting for a finger.
+pub enum BiometricKind {
+    /// Waiting for a finger, or for a face.
     Waiting,
     /// The last reading could not be used, or was not recognised.
     Retry,
@@ -165,7 +192,7 @@ pub enum FingerKind {
     Accepted,
 }
 
-impl FingerKind {
+impl BiometricKind {
     fn color(self, dim: Color) -> Color {
         match self {
             Self::Waiting => dim,
@@ -175,8 +202,18 @@ impl FingerKind {
     }
 }
 
-/// How far the fingerprint glyph swells on a retry, as a fraction of its size.
-const FINGER_PULSE_KICK: f32 = 6.0;
+/// How far a sensor's glyph swells on a retry, as a fraction of its size.
+const BIO_PULSE_KICK: f32 = 6.0;
+
+/// How wide the panel the flash wash leaves alone is, in logical pixels.
+///
+/// See [`PasswordScreen::set_flash`]. Wide enough for the field and the
+/// longest sentence under it, and no wider: every pixel outside it is light
+/// thrown at somebody's face, which is the entire point of the wash.
+const FLASH_PANEL_WIDTH: f32 = 560.0;
+
+/// How far the panel extends past the block it protects.
+const FLASH_PANEL_PAD: f32 = 36.0;
 
 /// What a keystroke asked the screen to do that it cannot do itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,12 +299,15 @@ pub struct PasswordScreen {
     unlock: Spring,
     spinner_angle: f32,
     line: Line,
-    /// The reader's row under the line, if a reader is being watched.
-    finger: Option<FingerPrompt>,
-    /// `1.0` when the finger row is showing.
-    finger_mix: Spring,
-    /// Swell of the fingerprint glyph; kicked on a retry and settles to zero.
-    finger_pulse: Spring,
+    /// A row under the line per sensor being watched, indexed by
+    /// [`Biometric::row`].
+    biometrics: [Option<BiometricPrompt>; 2],
+    /// `1.0` when the row is showing.
+    bio_mix: [Spring; 2],
+    /// Swell of the glyph; kicked on a retry and settles to zero.
+    bio_pulse: [Spring; 2],
+    /// The colour the screen is washed with for a liveness check, if any.
+    flash: Option<Flash>,
 }
 
 impl PasswordScreen {
@@ -321,9 +361,10 @@ impl PasswordScreen {
                 color: theme::TEXT_DIM,
                 alpha: Spring::at(0.0, STATE),
             },
-            finger: None,
-            finger_mix: Spring::at(0.0, STATE),
-            finger_pulse: Spring::at(0.0, SHAKE),
+            biometrics: [None, None],
+            bio_mix: [Spring::at(0.0, STATE), Spring::at(0.0, STATE)],
+            bio_pulse: [Spring::at(0.0, SHAKE), Spring::at(0.0, SHAKE)],
+            flash: None,
         }
     }
 
@@ -392,25 +433,56 @@ impl PasswordScreen {
         self.message = message;
     }
 
-    /// Show what the fingerprint reader is doing, or hide the row with `None`.
+    /// Show what a sensor is doing, or hide its row with `None`.
     ///
     /// A retry swells the glyph for a moment, the way a denial shakes the
     /// field: the change is felt before the words are read.
-    pub fn set_finger(&mut self, prompt: Option<FingerPrompt>) {
+    pub fn set_biometric(&mut self, which: Biometric, prompt: Option<BiometricPrompt>) {
+        let row = which.row();
         if let Some(next) = &prompt
-            && next.kind == FingerKind::Retry
-            && self.finger.as_ref() != Some(next)
+            && next.kind == BiometricKind::Retry
+            && self.biometrics[row].as_ref() != Some(next)
             && !self.reduced_motion
         {
-            self.finger_pulse.kick(FINGER_PULSE_KICK);
+            self.bio_pulse[row].kick(BIO_PULSE_KICK);
         }
-        self.finger = prompt;
+        self.biometrics[row] = prompt;
     }
 
-    /// What the finger row is showing.
+    /// What one sensor's row is showing.
     #[must_use]
-    pub fn finger(&self) -> Option<&FingerPrompt> {
-        self.finger.as_ref()
+    pub fn biometric(&self, which: Biometric) -> Option<&BiometricPrompt> {
+        self.biometrics[which.row()].as_ref()
+    }
+
+    /// Wash the screen with a colour, or stop with `None`.
+    ///
+    /// This is the screen's half of the face unlock liveness check, and it is
+    /// the one thing on this screen that exists to be seen by something other
+    /// than a person. `raven-faced` picks a short sequence of colours and
+    /// watches for the face in front of the camera to reflect them; a
+    /// photograph reflects the room instead. So this has to reach the panel
+    /// promptly and has to cover enough of it to light somebody up -- a subtle
+    /// tint would fail every live face on the machine.
+    ///
+    /// It leaves a panel in the middle alone, sized by [`FLASH_PANEL_WIDTH`].
+    /// Everything outside it is the light source; everything inside it is the
+    /// field somebody may be typing in, which must stay readable while the rest
+    /// of the screen turns green. A full-screen wash would emit slightly more
+    /// light and would put white text on a white background at the moment
+    /// somebody is deciding whether to type instead.
+    ///
+    /// Not sprung. A colour that faded in over 200ms is a colour the camera
+    /// sees arrive at a different time from the one the daemon asked for, and
+    /// the check is about exactly that timing.
+    pub fn set_flash(&mut self, flash: Option<Flash>) {
+        self.flash = flash;
+    }
+
+    /// The colour the screen is washed with, if any.
+    #[must_use]
+    pub fn flash(&self) -> Option<Flash> {
+        self.flash
     }
 
     /// Clear the typed password without touching anything else.
@@ -572,8 +644,8 @@ impl PasswordScreen {
             || !self.throttle_mix.settled()
             || !self.unlock.settled()
             || !self.line.alpha.settled()
-            || !self.finger_mix.settled()
-            || !self.finger_pulse.settled()
+            || self.bio_mix.iter().any(|m| !m.settled())
+            || self.bio_pulse.iter().any(|p| !p.settled())
             || self
                 .dots
                 .iter()
@@ -662,15 +734,22 @@ impl PasswordScreen {
             .set_target(if throttled { 1.0 } else { 0.0 });
 
         self.sync_line(now);
-        self.finger_mix
-            .set_target(if self.finger.is_some() { 1.0 } else { 0.0 });
+        for row in 0..self.biometrics.len() {
+            self.bio_mix[row].set_target(if self.biometrics[row].is_some() {
+                1.0
+            } else {
+                0.0
+            });
+        }
 
         if self.reduced_motion {
             // Position and size snap; only opacity and colour take time.
             self.shake.snap(0.0);
             self.caret_x.snap(self.caret_x.target());
             self.unlock.snap(self.unlock.target());
-            self.finger_pulse.snap(0.0);
+            for pulse in &mut self.bio_pulse {
+                pulse.snap(0.0);
+            }
             for dot in &mut self.dots {
                 dot.x.snap(dot.x.target());
                 dot.scale.snap(dot.scale.target());
@@ -686,8 +765,10 @@ impl PasswordScreen {
         self.throttle_mix.step(dt);
         self.unlock.step(dt);
         self.line.alpha.step(dt);
-        self.finger_mix.step(dt);
-        self.finger_pulse.step(dt);
+        for row in 0..self.bio_mix.len() {
+            self.bio_mix[row].step(dt);
+            self.bio_pulse[row].step(dt);
+        }
         for dot in &mut self.dots {
             dot.x.step(dt);
             dot.scale.step(dt);
@@ -895,6 +976,35 @@ impl PasswordScreen {
             (top, top + clock_height + gap)
         };
 
+        // The liveness wash, if one is up: painted after the backdrop and
+        // before anything is drawn on top of it, over everything but the
+        // panel the field lives in. See `set_flash`.
+        if let Some(flash) = self.flash {
+            let colour = Color::from_argb(
+                0xFF00_0000
+                    | (u32::from(flash.r) << 16)
+                    | (u32::from(flash.g) << 8)
+                    | u32::from(flash.b),
+            );
+            canvas.rounded_rect(Rect::new(0.0, 0.0, w, h), 0.0, colour);
+
+            let half = (s(FLASH_PANEL_WIDTH) / 2.0).min(w / 2.0 - s(8.0)).max(s(80.0));
+            let pad = s(FLASH_PANEL_PAD);
+            // Two rows of small text below the field for the sensors, which
+            // are exactly what is being drawn while a wash is up.
+            let rows = s(theme::SMALL_SIZE * 1.25 + 12.0) * 2.0;
+            let top = (clock_top - pad).max(0.0);
+            let bottom = (identity_top + identity_height + rows + pad).min(h);
+            canvas.rounded_rect(
+                Rect::new(frame.cx - half, top, half * 2.0, bottom - top),
+                s(18.0),
+                theme::BACKDROP,
+            );
+            // Whatever is behind the panel now, the ink on it is on the
+            // backdrop colour, so the wallpaper's contrast rules do not apply.
+            self.on_wallpaper = false;
+        }
+
         let mut y = clock_top;
         y = self.draw_padlock(canvas, &frame, y);
         y += s(12.0);
@@ -907,9 +1017,15 @@ impl PasswordScreen {
         y += s(14.0);
         self.draw_line(canvas, text, &frame, y);
         y += s(theme::SMALL_SIZE) * 1.25 + s(12.0);
-        self.draw_finger(canvas, text, &frame, y);
+        self.draw_biometrics(canvas, text, &frame, y);
 
-        self.draw_footer(canvas, text, &frame, w, h);
+        // Not while a wash is up. The footer is dim text at the very edge of
+        // the screen, which is the part the wash has turned bright, and it is
+        // the one thing on here nobody needs to read during the half second a
+        // camera is being shown a colour.
+        if self.flash.is_none() {
+            self.draw_footer(canvas, text, &frame, w, h);
+        }
 
         self.wallpaper = wallpaper;
     }
@@ -1186,15 +1302,45 @@ impl PasswordScreen {
         );
     }
 
-    /// The reader's row: a fingerprint and what it wants, centred as a pair.
-    fn draw_finger(&self, canvas: &mut Canvas<'_>, text: &mut TextRenderer, frame: &Frame, y: f32) {
-        let alpha = self.finger_mix.value().clamp(0.0, 1.0) * frame.alpha;
-        let Some(prompt) = &self.finger else {
-            return;
-        };
-        if alpha <= 0.0 {
-            return;
+    /// The sensors' rows: a glyph and what it wants, centred as a pair, one
+    /// row per sensor being watched.
+    ///
+    /// A row that is not showing takes no space, so a machine with only a
+    /// reader draws exactly what it drew before the camera existed.
+    fn draw_biometrics(
+        &self,
+        canvas: &mut Canvas<'_>,
+        text: &mut TextRenderer,
+        frame: &Frame,
+        y: f32,
+    ) {
+        // `y` arrives already scaled, as every other row's does, so the step
+        // between rows is scaled too.
+        let step = (theme::SMALL_SIZE * 1.25 + 6.0) * frame.scale;
+        let mut y = y;
+        for which in Biometric::ALL {
+            let row = which.row();
+            let alpha = self.bio_mix[row].value().clamp(0.0, 1.0) * frame.alpha;
+            let Some(prompt) = &self.biometrics[row] else {
+                continue;
+            };
+            if alpha > 0.0 {
+                self.draw_biometric_row(canvas, text, frame, y, which, prompt, alpha);
+            }
+            y += step;
         }
+    }
+
+    fn draw_biometric_row(
+        &self,
+        canvas: &mut Canvas<'_>,
+        text: &mut TextRenderer,
+        frame: &Frame,
+        y: f32,
+        which: Biometric,
+        prompt: &BiometricPrompt,
+        alpha: f32,
+    ) {
         let s = |v: f32| v * frame.scale;
         let style =
             TextStyle::new(theme::SMALL_SIZE, FontWeight::NORMAL).tracked(theme::SMALL_TRACKING);
@@ -1207,15 +1353,14 @@ impl PasswordScreen {
         let left = frame.cx - s(glyph * 2.0 + gap + words) / 2.0;
         let line_height = theme::SMALL_SIZE * 1.25;
         let gy = frame.y(y) + s(line_height) / 2.0;
+        let swell = s(glyph) * (1.0 + 0.04 * self.bio_pulse[which.row()].value());
 
-        draw_fingerprint(
-            canvas,
-            left + s(glyph),
-            gy,
-            s(glyph) * (1.0 + 0.04 * self.finger_pulse.value()),
-            s(1.3),
-            color,
-        );
+        match which {
+            Biometric::Fingerprint => {
+                draw_fingerprint(canvas, left + s(glyph), gy, swell, s(1.3), color);
+            }
+            Biometric::Face => draw_face(canvas, left + s(glyph), gy, swell, s(1.3), color),
+        }
         text.draw(
             canvas,
             &prompt.text,
@@ -1300,6 +1445,36 @@ impl Frame {
     fn y(&self, y: f32) -> f32 {
         self.pivot + (y - self.pivot) * self.lift
     }
+}
+
+/// A face, as an oval with two eyes and a mouth, about `(cx, cy)`.
+///
+/// Drawn rather than taken from a font, for the reason [`draw_fingerprint`] is:
+/// the login screen ships no icon font. Deliberately a face and not a camera --
+/// a camera icon says which device is being used, and what somebody needs to
+/// know is what to do with their own head.
+fn draw_face(canvas: &mut Canvas<'_>, cx: f32, cy: f32, radius: f32, stroke: f32, color: Color) {
+    use std::f32::consts::{PI, TAU};
+    // The outline, slightly taller than wide, as two arcs: a circle scaled on
+    // one axis is not something `arc` can draw, and at this size the ellipse
+    // nobody can see is not worth a second primitive.
+    canvas.circle_outline(cx, cy, radius, stroke, color);
+    // Eyes, at a third of the way up from the middle, a third of the way out.
+    let eye = (radius * 0.16).max(stroke * 0.8);
+    for side in [-1.0, 1.0] {
+        canvas.circle(cx + side * radius * 0.34, cy - radius * 0.18, eye, color);
+    }
+    // A mouth: the bottom third of a circle, so it reads as a smile at nine
+    // logical pixels rather than as a line.
+    canvas.arc(
+        cx,
+        cy - radius * 0.05,
+        radius * 0.46,
+        stroke,
+        PI * 0.18,
+        TAU * 0.32,
+        color,
+    );
 }
 
 /// A fingerprint, as nested arcs open at the bottom, about `(cx, cy)`.
@@ -1599,33 +1774,81 @@ mod tests {
         );
     }
 
-    /// The reader is offered beside the password, never instead of it.
+    /// A sensor is offered beside the password, never instead of it.
     #[test]
-    fn a_finger_prompt_leaves_the_field_typeable() {
+    fn a_sensor_prompt_leaves_the_field_typeable() {
+        for which in Biometric::ALL {
+            let mut s = screen();
+            s.set_biometric(
+                which,
+                Some(BiometricPrompt {
+                    text: "Look at the camera.".to_string(),
+                    kind: BiometricKind::Waiting,
+                }),
+            );
+            s.push_char('a');
+            assert!(!s.is_busy());
+            assert!(matches!(s.submit(Instant::now()), Action::Submit { .. }));
+        }
+    }
+
+    /// A machine with both sensors shows both rows, and one going quiet does
+    /// not take the other's row with it.
+    #[test]
+    fn the_two_sensors_have_their_own_rows() {
         let mut s = screen();
-        s.set_finger(Some(FingerPrompt {
-            text: "Touch the fingerprint sensor.".to_string(),
-            kind: FingerKind::Waiting,
-        }));
-        s.push_char('a');
-        assert!(!s.is_busy());
-        assert!(matches!(s.submit(Instant::now()), Action::Submit { .. }));
+        let prompt = |text: &str| {
+            Some(BiometricPrompt {
+                text: text.to_string(),
+                kind: BiometricKind::Waiting,
+            })
+        };
+        s.set_biometric(Biometric::Face, prompt("Look at the camera."));
+        s.set_biometric(Biometric::Fingerprint, prompt("Touch the sensor."));
+        assert_eq!(
+            s.biometric(Biometric::Face).map(|p| p.text.as_str()),
+            Some("Look at the camera.")
+        );
+
+        s.set_biometric(Biometric::Face, None);
+        assert!(s.biometric(Biometric::Face).is_none());
+        assert!(
+            s.biometric(Biometric::Fingerprint).is_some(),
+            "the reader's row outlives the camera's"
+        );
     }
 
     #[test]
     fn a_retry_swells_the_glyph_unless_motion_is_reduced() {
-        let retry = FingerPrompt {
+        let retry = BiometricPrompt {
             text: "Try again.".to_string(),
-            kind: FingerKind::Retry,
+            kind: BiometricKind::Retry,
         };
-        let mut s = screen();
-        s.set_finger(Some(retry.clone()));
-        assert!(!s.finger_pulse.settled());
+        for which in Biometric::ALL {
+            let mut s = screen();
+            s.set_biometric(which, Some(retry.clone()));
+            assert!(!s.bio_pulse[which.row()].settled());
 
-        let mut calm = screen();
-        calm.set_reduced_motion(true);
-        calm.set_finger(Some(retry));
-        assert!(calm.finger_pulse.settled());
+            let mut calm = screen();
+            calm.set_reduced_motion(true);
+            calm.set_biometric(which, Some(retry.clone()));
+            assert!(calm.bio_pulse[which.row()].settled());
+        }
+    }
+
+    /// The wash is the one thing on this screen drawn for a camera rather than
+    /// for a person, so it has to arrive at once and leave at once.
+    #[test]
+    fn a_flash_is_not_sprung_and_clears() {
+        let mut s = screen();
+        assert!(s.flash().is_none());
+        let green = Flash { r: 0, g: 255, b: 0 };
+        s.set_flash(Some(green));
+        assert_eq!(s.flash(), Some(green));
+        // No spring to settle: the colour is up on the very next frame, which
+        // is what the daemon on the other end is timing.
+        s.set_flash(None);
+        assert!(s.flash().is_none());
     }
 
     #[test]
@@ -1865,18 +2088,34 @@ mod tests {
             now += Duration::from_millis(16);
             frame(&mut s, now);
         }
-        s.set_finger(Some(FingerPrompt {
-            text: "Touch the fingerprint sensor.".to_string(),
-            kind: FingerKind::Waiting,
-        }));
+        s.set_biometric(
+            Biometric::Fingerprint,
+            Some(BiometricPrompt {
+                text: "Touch the fingerprint sensor.".to_string(),
+                kind: BiometricKind::Waiting,
+            }),
+        );
+        s.set_biometric(
+            Biometric::Face,
+            Some(BiometricPrompt {
+                text: "Look at the camera.".to_string(),
+                kind: BiometricKind::Waiting,
+            }),
+        );
         for _ in 0..5 {
             now += Duration::from_millis(16);
             frame(&mut s, now);
         }
-        s.set_finger(Some(FingerPrompt {
-            text: "Centre your finger on the sensor.".to_string(),
-            kind: FingerKind::Retry,
-        }));
+        s.set_flash(Some(Flash { r: 0, g: 255, b: 64 }));
+        frame(&mut s, now);
+        s.set_flash(None);
+        s.set_biometric(
+            Biometric::Fingerprint,
+            Some(BiometricPrompt {
+                text: "Centre your finger on the sensor.".to_string(),
+                kind: BiometricKind::Retry,
+            }),
+        );
         frame(&mut s, now);
         s.set_caps_lock(true);
         let _ = s.submit(now);
