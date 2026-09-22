@@ -71,6 +71,14 @@ const PRESENCE: Motion = Motion::smooth(0.45);
 /// password is waiting on this, and nobody is waiting on the lock screen to
 /// finish appearing.
 const DEPARTURE: Motion = Motion::smooth(0.28);
+/// How faded the leaving screen must be before it counts as gone.
+///
+/// Not zero, and not "settled": a critically damped spring spends as long
+/// crawling through its last two percent as it took to cover the first
+/// ninety-eight, and every frame of that crawl is a frame of dimmed wallpaper
+/// standing between somebody and the desktop they just unlocked. Two percent
+/// of the screen over the scrim is not something anybody can see.
+const GONE: f32 = 0.02;
 /// How much larger than life the screen is before it settles, and again as
 /// it lifts off. Enter and exit along the same path.
 const LIFT: f32 = 0.035;
@@ -688,7 +696,9 @@ impl PasswordScreen {
     /// this cannot be tricked into unlocking by a frame count.
     #[must_use]
     pub fn is_dismissed(&self) -> bool {
-        self.dismissing && self.presence.settled() && self.presence.value() <= 0.0
+        // The target check is what keeps this false while the latch is still
+        // opening: the fade has not started then, and the value is still 1.
+        self.dismissing && self.presence.target() <= 0.0 && self.presence.value() < GONE
     }
 
     /// Whether anything on the screen is still moving.
@@ -2076,6 +2086,12 @@ mod tests {
         assert!(s.unlock.value() > 0.0);
         assert_eq!(s.presence.target(), 1.0, "the lift waits for the latch");
         assert!(!s.is_dismissed());
+
+        // Gone once it has faded, not once the spring has come to rest: the
+        // reveal must not wait out the spring's tail.
+        let now = advance(&mut s, now, 25);
+        assert!(s.is_dismissed());
+        assert!(!s.presence.settled(), "dismissed before the spring's tail");
 
         advance(&mut s, now, 120);
         assert!(s.is_dismissed());
