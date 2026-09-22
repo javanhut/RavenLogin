@@ -65,10 +65,20 @@ use crate::ratelimit::RateLimiter;
 /// How often the accept loop wakes to check on the children it is supervising.
 const SUPERVISE_POLL: Duration = Duration::from_millis(100);
 
-/// How many greeter connections may be open at once: the one the greeter asks
-/// its questions on, one watching the reader, and room for either to be
-/// replaced while the old one is being torn down.
-const MAX_GREET_CONNECTIONS: usize = 4;
+/// How many greeter connections may be open at once.
+///
+/// Three in steady state -- the one the greeter asks its questions on, one
+/// watching the fingerprint reader, one watching the camera -- and room for
+/// both watches to be replaced while the old ones are still being torn down.
+/// That happens on every Tab: selecting another account drops both watches and
+/// starts two more, and `ravend` learns the old ones are gone only when their
+/// threads notice the hang-up.
+///
+/// It was 4 when there was one watch, which was the same arithmetic. Too small
+/// a number here does not fail loudly: the greeter's connection is refused, it
+/// logs a warning nobody is reading at a login screen, and that sensor simply
+/// stops being offered.
+const MAX_GREET_CONNECTIONS: usize = 6;
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()

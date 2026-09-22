@@ -172,6 +172,71 @@ every `wayland-*` socket and lock before a compositor is spawned -- nothing
 else may bind one there -- and the wait only counts an entry that is actually
 a socket.
 
+## Why the login screen is part of the liveness check
+
+This is the one place where the greeter -- the least trusted process here -- is
+doing something the security of a login depends on, and it is worth saying why
+that is not the contradiction it looks like.
+
+A camera that sees visible light cannot distinguish a face from a photograph of
+one. That is not a weakness of a particular recogniser; the two produce the
+same pixels. An infrared sensor can, and a machine that has one uses it. A
+machine that does not has exactly one thing that can put a known quantity of
+light on somebody's face at a known moment, and it is the screen they are
+looking at.
+
+So `raven-faced` picks a short sequence of colours, `ravend` relays it, and the
+greeter paints it. Three properties make that safe to ask of an untrusted
+process:
+
+**The sequence is the daemon's.** It comes from `/dev/urandom`, fresh for every
+attempt, and the greeter learns each colour when it is told to paint it. A
+greeter that could choose the sequence could replay a recording against it.
+
+**The claim is tested, not believed.** `Request::LoginByFace` carries a
+`flash: bool` -- the screen saying it will run the challenge. Nothing trusts
+it. A greeter that says yes and paints nothing produces frames in which no face
+reflects anything, which is what a photograph in a dark room also produces, and
+the attempt is refused. The field exists so that a screen which *cannot* flash
+is turned away early with a clear reason, rather than failing every face on the
+machine and looking broken.
+
+**A compromised greeter gains nothing it did not already have.** It cannot make
+the check pass -- the frames go to a process it cannot reach -- and it could
+already have refused to draw anything at all. The worst it can do is stop face
+unlock working, which is what dying already does.
+
+`ravend` is a relay here and deliberately not a participant. It does not choose
+colours, does not see frames, and has no opinion about the verdict. A colour it
+substituted would fail the check it was substituted into.
+
+## Why a face may not become root
+
+`FingerPolicy` has three switches and `FacePolicy` has two. The missing one is
+`sudo`, and it is missing by construction rather than by default -- there is no
+field in the protocol, no key in the policy file, and a `sudo = true` somebody
+writes into `/var/lib/raven-login/face/<account>.toml` by hand does nothing.
+
+The three proofs this machine takes are not equal, and the ranking is about how
+they are given rather than how strong the comparison is. A password is typed on
+purpose. A finger is pressed on purpose, onto a reader that has to be touched.
+A face is presented continuously, to a sensor across the room, by somebody who
+may be asleep, reading, or looking at something else entirely -- and unlike the
+other two, other people already have photographs of it.
+
+`sudo` is the prompt where that difference bites. Every other use of these is a
+machine that is already shut being opened by the person it belongs to. `sudo`
+is somebody already inside the session reaching for the rest of the system, and
+the thing standing between those two is the one credential that cannot be
+collected by pointing a camera at somebody.
+
+The same argument taken one step further would say a finger should not do
+`sudo` either. It is a closer call than this one, and `raven-finger` makes it
+the other way: a reader has to be touched deliberately, and `raven-finger-auth`
+falls through to the password prompt the moment it gives up. The line is drawn
+between "presented on purpose" and "merely present", and a face is on the wrong
+side of it.
+
 ## Ordering that is load-bearing
 
 Three places where the sequence matters and the wrong one fails quietly:
@@ -235,6 +300,25 @@ already conceded that. Because "that account is locked" tells somebody who is
 not the account's owner something they have no use for, and tells the owner
 nothing they can act on either. The real reason goes to the log every time, so
 "it just says wrong password" is always diagnosable.
+
+## Two sensors, one set of rules
+
+`crates/ravend/src/bio.rs` exists because a finger and a face are the same kind
+of thing once the hardware is out of the way, and every rule about what a
+biometric proof is worth here is security-relevant. Two copies of a security
+rule is one copy that gets fixed.
+
+What is shared: what a watch is *for* and which switch it needs; the strike
+budget and how it is spent; how a watch ends when its client goes away; and
+`admit`, which turns a match into a session only if the account is one that may
+come in at all -- a locked or expired account is refused there exactly as its
+password would have been.
+
+What is deliberately *not* shared is the count itself. Each modality has its own
+budget, because a dark room spending the camera's three tries must not also
+stop the fingerprint reader working: they fail for unrelated reasons. A right
+password clears both, because a password is stronger than either and it has
+just been given.
 
 ## Testing what cannot be booted
 

@@ -67,11 +67,13 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many connections may be in flight at once.
 ///
-/// A lock screen needs one. The rest of the allowance is for a second one
-/// starting while a first is being torn down, and the cap is what stops a local
-/// process from spawning a thread in this daemon for every file descriptor it
-/// can open.
-const MAX_CONNECTIONS: usize = 8;
+/// A lock screen needs three: the one it asks its question on, one watching
+/// the fingerprint reader, one watching the camera. A settings window open at
+/// the same time adds another. The rest of the allowance is for those starting
+/// while their predecessors are being torn down, and the cap is what stops a
+/// local process from spawning a thread in this daemon for every file
+/// descriptor it can open.
+const MAX_CONNECTIONS: usize = 12;
 
 /// Start serving verify requests, and return.
 ///

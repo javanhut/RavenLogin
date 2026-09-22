@@ -39,6 +39,48 @@ is the only thing that asks it on anybody's behalf, and decides what a match is
 worth. See `crates/ravend/src/finger.rs`, `crates/raven-finger`, and RavenGUI's
 `docs/fingerprint.md` for the design.
 
+## Faces
+
+The same shape as fingerprints and off the same way: enrol a look in Settings >
+Security -- with glasses, without, one for a badly lit room -- and choose
+whether it logs in, unlocks the screen, or both. Each switch that goes on asks
+for the password, the password field never goes away, and after three faces it
+does not recognise the camera stops offering itself until the password is used.
+
+Two switches and not three. **A face cannot approve `sudo`.** A fingerprint is
+presented on purpose to a reader that has to be touched; a face is presented
+continuously, to a sensor across the room, by somebody who may be asleep -- and
+`sudo` is the one prompt where the password is doing real work. So a face may
+open a machine that is already shut, and may not become root. There is no
+switch for it, no field in the protocol, and no key in the policy file.
+
+Nothing that is or resembles a picture is stored or sent anywhere. What is kept
+is 128 numbers per capture, under `/var/lib/raven-face`, root-only. No frame
+ever leaves `raven-faced`: there is no verb on its socket that returns one, and
+the login screen -- the least trusted process on the machine -- gets a verdict,
+a correction, and a colour to paint.
+
+### The colour is the point
+
+A camera that sees visible light cannot tell a face from a photograph of one.
+So the screen is part of the check: it flashes a short sequence of colours,
+picked fresh from `/dev/urandom` for every attempt, and `raven-faced` checks
+that the face reflects *that* sequence, that the light lands unevenly the way
+it does on something with a nose, and that it is not mirrored straight back the
+way glossy paper and phone glass do. It takes about three quarters of a second,
+and it is not optional: a screen that will not run it is refused rather than
+served a weaker check.
+
+A machine with an infrared camera uses that instead and skips the flashing. An
+IR sensor sees a warm face and does not see a picture of one.
+
+What none of this stops is a well-made three-dimensional mask. Nothing short of
+a depth sensor does, and this does not pretend otherwise.
+
+The camera is `raven-faced`'s (RavenLinux), on a root-only socket; `ravend` is
+the only thing that asks it on anybody's behalf. See `crates/ravend/src/face.rs`,
+`crates/raven-face`, and RavenLinux's `faced/src/liveness.rs`.
+
 ## The lock screen
 
 `raven-lock` is here rather than in RavenGUI because it is the login screen
