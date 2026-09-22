@@ -15,8 +15,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use raven_auth::Account;
+use raven_greet_proto::Secret;
 use raven_privdrop::Credentials;
 use rustix::process::{Pid, Signal, kill_process};
+
+use crate::config::Keyring;
 
 /// How often to look at a child that is being asked to exit.
 const REAP_POLL: Duration = Duration::from_millis(50);
@@ -282,6 +285,173 @@ pub(crate) fn spawn_greeter_ui(
 /// Start the session for whoever just logged in.
 pub(crate) fn spawn_session(command: &str, account: &Account, runtime_dir: &Path) -> Result<Child> {
     spawn_as(command, account, runtime_dir, &[])
+}
+
+// --- the keyring handoff -----------------------------------------------------
+//
+// After authenticating and before the session starts: get HuginnKeyring's
+// daemon running as the account that just logged in, and, if the login proved
+// itself with a password, hand it over. See `handoff_keyring`, the entry point
+// `run_session` calls; everything above it is a helper with no other caller.
+
+/// Where the keyring daemon's native socket is, inside a runtime directory
+/// [`prepare_runtime_dir`] has already made.
+///
+/// Duplicated from `huginn_keyringd::paths` rather than depended on: that
+/// module is the daemon's own crate, not part of the wire protocol crate this
+/// links, and the path it builds -- `$XDG_RUNTIME_DIR/huginn-keyring/socket`
+/// -- is as much this handoff's contract with the daemon as the wire format
+/// is.
+fn keyring_socket_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("huginn-keyring").join("socket")
+}
+
+/// Start the keyring daemon as `account`.
+///
+/// Its own function rather than another `spawn_as` call inlined into
+/// `handoff_keyring`, because that is the boundary between "starts a process"
+/// and "decides whether a failure to start one matters" -- every other spawn
+/// in this file matters enough to propagate with `?`; this is the one that
+/// does not, and keeping the two apart is what stops that from being subtle.
+fn spawn_keyring_daemon(daemon: &str, account: &Account, runtime_dir: &Path) -> Result<Child> {
+    spawn_as(daemon, account, runtime_dir, &[])
+}
+
+/// Wait for the keyring daemon to bind its socket.
+///
+/// The same poll [`wait_for_wayland_socket`] uses, for the same reason: this
+/// runs once per login, for at most a few seconds, and nothing here is timing
+/// it closely enough for inotify to be worth the extra failure modes.
+fn wait_for_keyring_socket(runtime_dir: &Path, child: &mut Child, timeout: Duration) -> Result<PathBuf> {
+    let path = keyring_socket_path(runtime_dir);
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("cannot check on the keyring daemon")?
+        {
+            anyhow::bail!("the keyring daemon exited before binding its socket ({status})");
+        }
+
+        let is_socket = std::fs::metadata(&path)
+            .map(|m| m.file_type().is_socket())
+            .unwrap_or(false);
+        if is_socket {
+            return Ok(path);
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "no keyring socket appeared at {} within {timeout:?}",
+                path.display()
+            );
+        }
+        std::thread::sleep(REAP_POLL);
+    }
+}
+
+/// Get the keyring daemon running for `account` and, if the login proved
+/// itself with a password, hand it over -- so the login keyring is already
+/// open by the time the desktop appears, with no separate prompt for a
+/// password that was just typed.
+///
+/// # Nothing here is a reason to refuse a session
+///
+/// That is the same rule `pam_huginn_keyring.so` is built on -- see
+/// `docs/pam.md` in HuginnKeyring for the fuller argument -- and every branch
+/// below follows it: a daemon that is not installed, a daemon that fails to
+/// start, a socket that never appears, a password the keyring does not
+/// accept, are none of them errors this function returns. Each is logged and
+/// the session starts regardless, with whatever that outcome leaves working --
+/// nothing, if the daemon never came up; Secret Service and the SSH agent but
+/// a locked keyring, if there was no password or the wrong one; everything, on
+/// the path this exists for.
+///
+/// `enabled = false` in `[keyring]` is the one hard off switch, checked first
+/// and silent, for a machine that wants none of this.
+///
+/// Returns the daemon's [`Child`] when one was started, so the caller can stop
+/// it when the session ends -- the daemon holds every key this session
+/// unlocks, and that memory has to die with the session rather than outlive it
+/// for the next person who sits at the same seat. `None` when nothing was
+/// started, which leaves nothing to stop.
+pub(crate) fn handoff_keyring(
+    account: &Account,
+    runtime_dir: &Path,
+    keyring: &Keyring,
+    password: Option<Secret>,
+) -> Option<Child> {
+    if !keyring.enabled {
+        return None;
+    }
+    if !Path::new(&keyring.daemon).is_file() {
+        // Not installed. HuginnKeyring is an optional package -- see its own
+        // manifest in RavenLinux -- so this is the ordinary state of a machine
+        // that has not opted in, not a misconfiguration worth a warning at
+        // every single login.
+        tracing::debug!(daemon = %keyring.daemon, "keyring daemon is not installed; skipping");
+        return None;
+    }
+
+    let mut child = match spawn_keyring_daemon(&keyring.daemon, account, runtime_dir) {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(user = %account.name, error = %e, "cannot start the keyring daemon");
+            return None;
+        }
+    };
+
+    let socket = match wait_for_keyring_socket(runtime_dir, &mut child, keyring.start_timeout) {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::warn!(user = %account.name, error = %e, "keyring daemon did not come up in time");
+            return Some(child);
+        }
+    };
+
+    let Some(password) = password else {
+        // A face or a finger logged this account in, and neither proves a
+        // password the keyring could be opened with. The daemon stays up --
+        // Secret Service, the SSH agent and the rest all work -- and the login
+        // keyring stays locked until something asks for it.
+        tracing::debug!(user = %account.name, "no password to hand off; keyring stays locked");
+        return Some(child);
+    };
+
+    match huginn_wire::Client::connect_to(&socket) {
+        Ok(mut client) => {
+            let request = huginn_wire::proto::Request::Handoff {
+                password: huginn_wire::SecretBytes::from(password.as_bytes()),
+            };
+            match client.call(&request) {
+                Ok(huginn_wire::proto::Response::Ok) => {
+                    tracing::info!(user = %account.name, "keyring unlocked");
+                }
+                Ok(huginn_wire::proto::Response::Error { message, .. }) => {
+                    // The documented, expected case: the account password and
+                    // the keyring password have been changed apart. The
+                    // keyring stays locked; something will prompt for it.
+                    tracing::info!(user = %account.name, %message, "keyring handoff declined");
+                }
+                Ok(other) => {
+                    tracing::warn!(
+                        user = %account.name,
+                        ?other,
+                        "unexpected reply to a keyring handoff"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(user = %account.name, error = %e, "keyring handoff failed");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(user = %account.name, error = %e, "cannot connect to the keyring daemon");
+        }
+    }
+
+    Some(child)
 }
 
 /// Wait for a compositor to bind its Wayland socket, and say which one.

@@ -31,8 +31,10 @@ kernel
             │  │                                                      │
             ├──┼─ stop raven-greeter, then huginn   SIGTERM → SIGKILL │
             ├──┼─ prepare /run/user/<user uid>                        │
+            ├──┼─ start huginn-keyringd, hand it the password          │
             ├──┼─ spawn raven-wayland-session  as the authenticated user│
             ├──┼─ wait for it to exit                                 │
+            ├──┼─ stop huginn-keyringd                                │
             │  └──────────────── back to the top ─────────────────────┘
 ```
 
@@ -41,6 +43,35 @@ greeter's compositor holds the DRM master and the seat. A session compositor
 that cannot acquire either fails in a way that looks like a driver problem, and
 the two symptoms — "the GPU is broken" and "something else is still holding it"
 — are indistinguishable from the console.
+
+## Why `ravend` starts the keyring daemon
+
+HuginnKeyring's own PAM module deliberately does not start its daemon --
+starting one from inside `login`'s process, mid-authentication, means a
+`fork`, a privilege drop and an `execve`, all in the one place a mistake is a
+root-held handle in the wrong process. Its docs (`docs/pam.md` in that
+repository) name the alternative: something that already authenticates the
+user and starts their session can start the daemon itself, as that user, and
+hand over the password in the same step -- no privilege to drop, because
+nothing here was more privileged a moment ago than it is now.
+
+`ravend` is exactly that something, and it is the reason `prepare
+/run/user/<user uid>` and `spawn raven-wayland-session` are two separate steps
+in the loop above rather than one: the daemon needs a runtime directory to put
+its socket in and does not need, or get, the rest of what the session sets up.
+It is started right after the directory exists and right before the session
+is, holds the login password just long enough to hand it over the socket, and
+is stopped once the session ends -- it holds every key that session unlocked,
+and that memory has no business outliving the session for the next person who
+sits at the same seat.
+
+None of this can fail the login. A machine without HuginnKeyring installed
+skips every step silently; a face or a finger login has no password to hand
+over and leaves the keyring locked for the first application that asks; a
+password the keyring does not accept -- account and keyring changed apart --
+does the same. See `crates/ravend/src/session.rs`'s `handoff_keyring`, and the
+`[keyring]` section of `login.toml`, for the one switch that turns all of it
+off.
 
 ## Why the greeter is a layer-shell client
 

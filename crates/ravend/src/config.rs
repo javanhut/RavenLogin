@@ -30,6 +30,7 @@ pub(crate) struct Config {
     pub session: Session,
     pub policy: Policy,
     pub ratelimit: RateLimit,
+    pub keyring: Keyring,
 }
 
 /// The unprivileged half: who draws the login screen, and how.
@@ -133,6 +134,41 @@ impl From<Policy> for raven_auth::Policy {
     }
 }
 
+/// The keyring daemon to start before the session, and hand the login
+/// password to. See `session::handoff_keyring`.
+///
+/// Every field here has a soft failure, on purpose: a daemon that is not
+/// installed, a socket that never appears, a password the keyring does not
+/// accept, all leave the session to start exactly as it would if this
+/// section did not exist. `enabled` is the one hard off switch, for a machine
+/// that has HuginnKeyring installed for something else and does not want
+/// ravend touching it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct Keyring {
+    pub enabled: bool,
+    /// The daemon binary. A relative name would be resolved against
+    /// whatever `PATH` this process happens to have, which is root's; an
+    /// absolute path is the only spelling that is unambiguous run as root and
+    /// run as the session account alike.
+    pub daemon: String,
+    /// How long to wait for the daemon's socket to appear before giving up on
+    /// the handoff for this login. The session starts either way -- see
+    /// `session::handoff_keyring`.
+    #[serde(with = "seconds")]
+    pub start_timeout: Duration,
+}
+
+impl Default for Keyring {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            daemon: "/usr/bin/huginn-keyringd".to_string(),
+            start_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct RateLimit {
@@ -214,6 +250,8 @@ mod tests {
         assert_eq!(config.session.command, "/usr/bin/raven-wayland-session");
         assert!(!config.policy.allow_root);
         assert!(!config.policy.allow_empty_password);
+        assert!(config.keyring.enabled);
+        assert_eq!(config.keyring.daemon, "/usr/bin/huginn-keyringd");
     }
 
     /// A partial file must leave everything it does not mention alone. This is
@@ -270,5 +308,13 @@ mod tests {
     fn ratelimit_defaults_match_the_limiter() {
         let ours: Limits = RateLimit::default().into();
         assert_eq!(ours, Limits::default());
+    }
+
+    #[test]
+    fn keyring_can_be_turned_off() {
+        let config: Config = toml::from_str("[keyring]\nenabled = false\n").expect("valid");
+        assert!(!config.keyring.enabled);
+        // The rest of the section keeps its defaults.
+        assert_eq!(config.keyring.daemon, "/usr/bin/huginn-keyringd");
     }
 }

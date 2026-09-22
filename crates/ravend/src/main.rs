@@ -57,7 +57,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use raven_auth::{Account, Authenticator, Denial, Outcome};
-use raven_greet_proto::{Request, Response, SOCKET_PATH, User};
+use raven_greet_proto::{Request, Response, SOCKET_PATH, Secret, User};
 
 use crate::config::Config;
 use crate::ratelimit::RateLimiter;
@@ -79,6 +79,21 @@ const SUPERVISE_POLL: Duration = Duration::from_millis(100);
 /// logs a warning nobody is reading at a login screen, and that sensor simply
 /// stops being offered.
 const MAX_GREET_CONNECTIONS: usize = 6;
+
+/// The account to start a session for, and -- when the login proved it by
+/// typing a password rather than showing a face or a finger -- the password
+/// itself, carried this one extra step to open that account's keyring before
+/// the session starts. See `session::handoff_keyring`.
+///
+/// `password` is `None` for a face or a finger login for the plainest reason:
+/// neither one produces a password, so there is nothing here to hand the
+/// keyring. It stays locked until something asks for it, same as it would
+/// anywhere the handoff never runs at all.
+#[derive(Debug)]
+struct Login {
+    account: Account,
+    password: Option<Secret>,
+}
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -154,14 +169,14 @@ fn run() -> Result<()> {
     // exactly why.
     let mut failures = Backoff::default();
     loop {
-        let account = match greet(
+        let login = match greet(
             &config,
             &greeter_account,
             &listener,
             &authenticator,
             &mut limiter,
         ) {
-            Ok(account) => account,
+            Ok(login) => login,
             Err(e) => {
                 let wait = failures.next_delay();
                 tracing::error!("the login screen failed: {e:#}; retrying in {wait:?}");
@@ -171,14 +186,14 @@ fn run() -> Result<()> {
         };
         failures.reset();
 
-        tracing::info!(user = %account.name, uid = account.uid, "starting session");
-        if let Err(e) = run_session(&config, &account) {
+        tracing::info!(user = %login.account.name, uid = login.account.uid, "starting session");
+        if let Err(e) = run_session(&config, &login.account, login.password) {
             // Could not even start it. Not the daemon's failure and not fatal:
             // the person is standing in front of the screen, and the login
             // screen is where they can be told.
-            tracing::error!(user = %account.name, "cannot run the session: {e:#}");
+            tracing::error!(user = %login.account.name, "cannot run the session: {e:#}");
         }
-        tracing::info!(user = %account.name, "session ended; returning to the login screen");
+        tracing::info!(user = %login.account.name, "session ended; returning to the login screen");
     }
 }
 
@@ -297,7 +312,7 @@ fn greet(
     listener: &UnixListener,
     authenticator: &Authenticator,
     limiter: &mut RateLimiter,
-) -> Result<Account> {
+) -> Result<Login> {
     let runtime_dir = session::prepare_runtime_dir(greeter.uid, greeter.gid)?;
 
     let mut compositor =
@@ -334,7 +349,7 @@ fn greet_inner(
     listener: &UnixListener,
     authenticator: &Authenticator,
     limiter: &mut RateLimiter,
-) -> Result<Account> {
+) -> Result<Login> {
     let display =
         session::wait_for_wayland_socket(runtime_dir, compositor, config.greeter.wayland_timeout)?;
 
@@ -383,15 +398,15 @@ fn accept_until_login(
     limiter: &mut RateLimiter,
     greeter_uid: u32,
     wallpaper: Option<&Path>,
-) -> Result<Account> {
+) -> Result<Login> {
     let limiter = Mutex::new(limiter);
     let granted = AtomicBool::new(false);
     let live = AtomicUsize::new(0);
     let open: Mutex<Vec<UnixStream>> = Mutex::new(Vec::new());
-    let (logins, login) = mpsc::channel::<Account>();
+    let (logins, login) = mpsc::channel::<Login>();
 
     std::thread::scope(|scope| {
-        let outcome = (|| -> Result<Account> {
+        let outcome = (|| -> Result<Login> {
             let mut last_sweep = Instant::now();
             loop {
                 match listener.accept() {
@@ -414,8 +429,8 @@ fn accept_until_login(
                                     greeter_uid,
                                     wallpaper,
                                 ) {
-                                    Ok(Some(account)) => {
-                                        let _ = logins.send(account);
+                                    Ok(Some(login)) => {
+                                        let _ = logins.send(login);
                                     }
                                     Ok(None) => {}
                                     Err(e) => tracing::warn!("greeter connection failed: {e:#}"),
@@ -431,8 +446,8 @@ fn accept_until_login(
                     }
                 }
 
-                if let Ok(account) = login.try_recv() {
-                    return Ok(account);
+                if let Ok(login) = login.try_recv() {
+                    return Ok(login);
                 }
 
                 if let Some(status) = compositor
@@ -482,7 +497,7 @@ fn serve(
     granted: &AtomicBool,
     greeter_uid: u32,
     wallpaper: Option<&Path>,
-) -> Result<Option<Account>> {
+) -> Result<Option<Login>> {
     // Who is actually on the other end. The socket's permissions should already
     // guarantee this, but permissions are a property of a path, and a path can
     // be got wrong by a packaging change nobody noticed. `SO_PEERCRED` is a
@@ -586,7 +601,12 @@ fn serve(
                         .unwrap_or_else(|e| e.into_inner())
                         .record_success(&username);
                 }
-                return Ok(admitted);
+                // No password: a finger proves nothing the keyring could be
+                // opened with. See `Login`.
+                return Ok(admitted.map(|account| Login {
+                    account,
+                    password: None,
+                }));
             }
 
             // The same shape as `LoginByFinger`, with one extra field: the
@@ -622,7 +642,12 @@ fn serve(
                         .unwrap_or_else(|e| e.into_inner())
                         .record_success(&username);
                 }
-                return Ok(admitted);
+                // No password: a face proves nothing the keyring could be
+                // opened with. See `Login`.
+                return Ok(admitted.map(|account| Login {
+                    account,
+                    password: None,
+                }));
             }
 
             // Not served here, and the refusal is deliberate rather than an
@@ -697,7 +722,10 @@ fn serve(
                                 username: username.clone(),
                             },
                         )?;
-                        return Ok(Some(*account));
+                        return Ok(Some(Login {
+                            account: *account,
+                            password: Some(secret),
+                        }));
                     }
                     Ok(Outcome::Denied(denial)) => {
                         limiter.record_failure(&username, now);
@@ -738,17 +766,38 @@ fn serve(
 }
 
 /// Start the session and wait for it to finish.
-fn run_session(config: &Config, account: &Account) -> Result<()> {
+fn run_session(config: &Config, account: &Account, password: Option<Secret>) -> Result<()> {
     let runtime_dir = session::prepare_runtime_dir(account.uid, account.gid)?;
-    let mut child = session::spawn_session(&config.session.command, account, &runtime_dir)?;
 
-    let status = child.wait().context("cannot wait for the session")?;
-    if !status.success() {
-        // Not fatal to the daemon. A session that crashes should put the login
-        // screen back up, not take the machine down to a console.
-        tracing::warn!(user = %account.name, %status, "the session exited badly");
+    // Before the session starts, not after: the whole point of doing this here
+    // is that the keyring is already open by the time the desktop appears,
+    // with no separate prompt for a password just typed. `handoff_keyring`
+    // never fails this function -- see its own doc comment for what each
+    // outcome leaves working.
+    let mut keyring = session::handoff_keyring(account, &runtime_dir, &config.keyring, password);
+
+    // Wrapped so the keyring daemon is stopped on every exit from here,
+    // including a session that never managed to start -- the same shape
+    // `greet` uses to guarantee the greeter's compositor comes down.
+    let result = (|| -> Result<()> {
+        let mut child = session::spawn_session(&config.session.command, account, &runtime_dir)?;
+
+        let status = child.wait().context("cannot wait for the session")?;
+        if !status.success() {
+            // Not fatal to the daemon. A session that crashes should put the
+            // login screen back up, not take the machine down to a console.
+            tracing::warn!(user = %account.name, %status, "the session exited badly");
+        }
+        Ok(())
+    })();
+
+    // The daemon holds every key this session unlocked, so that memory has to
+    // die with the session -- see `handoff_keyring`'s own doc comment.
+    if let Some(daemon) = &mut keyring {
+        session::stop(daemon, config.session.stop_timeout, "keyring daemon");
     }
-    Ok(())
+
+    result
 }
 
 #[cfg(test)]

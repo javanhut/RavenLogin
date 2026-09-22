@@ -12,6 +12,7 @@ raven-greet-proto.workspace = true
 raven-finger.workspace = true
 raven-face.workspace = true
 raven-privdrop.workspace = true
+huginn-wire.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true

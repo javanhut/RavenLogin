@@ -49,6 +49,21 @@ raven-finger = { path = "crates/raven-finger" }
 raven-face = { path = "crates/raven-face" }
 raven-ui = { path = "crates/raven-ui" }
 
+# HuginnKeyring's wire protocol and blocking client -- `ravend` alone, for the
+# login handoff: after authenticating, it starts the keyring daemon as the
+# user and hands the password over this, the same client the PAM module and
+# the PKCS#11 module use rather than a second implementation of the protocol.
+# See crates/ravend/src/session.rs.
+#
+# Not a path dependency. HuginnKeyring is its own repository, built and
+# versioned on its own, the same way RavenLogin is to RavenLinux -- see
+# RavenLinux's packages/raven/huginn-keyring/package.toml for the other half
+# of that relationship. Deliberately unpinned, as this workspace's own
+# `repository` and RavenLinux's manifests for ravengui and ravenlogin are:
+# nothing has been tagged in that repository yet, so a `rev` added here is now
+# the commit every build of this crate fetches.
+huginn-wire = { git = "https://github.com/javanhut/HuginnKeyring.git" }
+
 # The hash primitive, and nothing else from RustCrypto: sha512-crypt is
 # implemented here rather than pulled in, so the only thing trusted to a
 # dependency is SHA-512 itself.

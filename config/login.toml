@@ -101,3 +101,26 @@ free_attempts = 3
 base_delay_ms = 1000
 max_delay_ms = 30000
 forget_after_s = 900
+
+[keyring]
+# Whether ravend starts HuginnKeyring's daemon as the account that just logged
+# in and hands it the password, so the login keyring is already open before
+# the session appears. See ARCHITECTURE.md and, in the HuginnKeyring
+# repository, docs/pam.md.
+#
+# On by default and safe to leave on whether or not HuginnKeyring is
+# installed: a missing daemon binary is logged at debug and nothing more, a
+# face or finger login has no password to hand over and leaves the keyring
+# locked, and a wrong or absent password does the same. Turn it off only for a
+# machine that has the daemon installed for something else and does not want
+# ravend touching it.
+enabled = true
+
+# The daemon binary. Absolute, because this runs once as root before dropping
+# to the session account and once again as that account, and a relative name
+# would be resolved against whichever `PATH` happened to be in scope.
+daemon = "/usr/bin/huginn-keyringd"
+
+# How long to wait for the daemon's socket to appear before giving up on the
+# handoff for this one login. The session starts either way.
+start_timeout = 5
