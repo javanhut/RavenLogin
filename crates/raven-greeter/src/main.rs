@@ -178,6 +178,7 @@ fn run() -> Result<()> {
         scale: 1.0,
         configured: false,
         exit: false,
+        frame_pending: false,
         ctrl: false,
         screen: {
             let mut screen = PasswordScreen::new(users);
@@ -224,6 +225,10 @@ struct Greeter {
     scale: f32,
     configured: bool,
     exit: bool,
+    /// Whether a `wl_surface.frame` callback is already waiting to be
+    /// signalled. See `draw`: without this, every keypress adds one more
+    /// full-screen redraw per frame, permanently.
+    frame_pending: bool,
     /// Whether Control is held. Tracked because the keysym for Ctrl-U is
     /// simply `u`: without this, typing the letter "u" into a password would
     /// take the Ctrl-U branch and silently clear the field.
@@ -457,14 +462,32 @@ impl Greeter {
                 .draw(&mut canvas, &mut self.text, self.scale, Instant::now());
         }
 
-        let surface = self.layer.wl_surface();
+        let surface = self.layer.wl_surface().clone();
         surface.damage_buffer(0, 0, width, height);
-        // Ask for another frame unconditionally: the caret blinks and the clock
-        // ticks, so this surface is never truly static. The compositor paces
-        // this to the refresh rate, so it costs one memset-sized redraw per
-        // frame and nothing else.
-        surface.frame(qh, FrameCallbackData(surface.clone()));
-        if let Err(e) = buffer.attach_to(surface) {
+        // Keep exactly one frame callback in flight -- never a second.
+        //
+        // The caret blinks and the clock ticks, so this surface is never truly
+        // static and something has to keep asking for frames. But `draw` is
+        // reached from the frame callback *and* from every keypress, and a
+        // `wl_surface.frame` on each of those compounds rather than replaces:
+        // callbacks queued by separate commits inside one refresh interval are
+        // all signalled together, and each one signalled draws again and queues
+        // another. So a keystroke landing between two frames does not cost one
+        // extra redraw, it permanently adds one redraw per frame, for the rest
+        // of the process's life. Typing a twelve-character password left the
+        // greeter drawing the whole screen thirteen times per frame -- which is
+        // exactly the point at which the field starts lagging behind the
+        // keyboard, and it never recovers, because nothing here ever cancels a
+        // callback.
+        //
+        // With this, a keypress still redraws immediately, and the pending
+        // callback still brings the next frame around. There is just only ever
+        // one of it.
+        if !self.frame_pending {
+            surface.frame(qh, FrameCallbackData(surface.clone()));
+            self.frame_pending = true;
+        }
+        if let Err(e) = buffer.attach_to(&surface) {
             tracing::error!("cannot attach the buffer: {e}");
             return;
         }
@@ -550,6 +573,8 @@ impl CompositorHandler for Greeter {
     }
 
     fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        // Fired, so no longer pending: the draw below is what queues the next.
+        self.frame_pending = false;
         self.draw(qh);
     }
 

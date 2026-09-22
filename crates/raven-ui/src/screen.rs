@@ -243,6 +243,58 @@ struct Line {
     alpha: Spring,
 }
 
+/// The built-in backdrop, rendered once per surface size.
+///
+/// [`Canvas::gradient`] dithers every pixel through a Bayer matrix, which
+/// makes it by far the most expensive thing on a frame that has no wallpaper
+/// under it: 4.7 ms of a 5.1 ms frame at 1920x1080, and 18.7 ms at 3840x2160 --
+/// more than a 60 Hz frame budget, to draw a backdrop. And it is the same
+/// picture every time, because its two colours are constants and its only
+/// other input is the surface size.
+///
+/// So it is drawn once and kept, exactly as [`Wallpaper::prepared`] keeps the
+/// scaled photograph, and a frame on the plain backdrop then costs the same
+/// `memcpy` a wallpapered one does.
+///
+/// A machine that has a wallpaper never allocates this: the buffer is filled
+/// on the first frame that actually asks for it, so the two full-size caches
+/// are never both held.
+#[derive(Default)]
+struct PlainBackdrop {
+    width: i32,
+    height: i32,
+    pixels: Vec<u8>,
+}
+
+impl std::fmt::Debug for PlainBackdrop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-written for the reason `Wallpaper`'s is: the derived one would
+        // try to format several megabytes of pixels into a log line.
+        f.debug_struct("PlainBackdrop")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+impl PlainBackdrop {
+    /// The backdrop at `width` x `height`, ready to blit.
+    ///
+    /// Re-rendered only when the surface size changes, which happens at the
+    /// first configure and then essentially never.
+    fn pixels(&mut self, width: i32, height: i32) -> &[u8] {
+        if self.width != width || self.height != height || self.pixels.is_empty() {
+            tracing::debug!(width, height, "rendering the backdrop");
+            self.pixels = vec![0; (width.max(0) * height.max(0) * 4) as usize];
+            let mut canvas = Canvas::new(&mut self.pixels, width, height);
+            canvas.gradient(theme::BACKDROP, theme::BACKDROP_EDGE);
+            self.width = width;
+            self.height = height;
+        }
+        &self.pixels
+    }
+}
+
 /// The login screen.
 #[derive(Debug)]
 pub struct PasswordScreen {
@@ -263,6 +315,9 @@ pub struct PasswordScreen {
     /// The image to draw on, if the machine has one. `None` is the built-in
     /// backdrop, and is the default on a machine that has not configured one.
     wallpaper: Option<Wallpaper>,
+    /// The built-in backdrop, kept between frames. Untouched, and unallocated,
+    /// while there is a wallpaper to draw instead.
+    backdrop: PlainBackdrop,
     /// Whether the last frame actually got a wallpaper under it.
     ///
     /// Not the same question as `wallpaper.is_some()`: the blit can be refused
@@ -342,6 +397,7 @@ impl PasswordScreen {
             hostname: read_hostname(),
             os_name: read_os_pretty_name(),
             wallpaper: None,
+            backdrop: PlainBackdrop::default(),
             on_wallpaper: false,
             reduced_motion: false,
             last_frame: None,
@@ -923,7 +979,14 @@ impl PasswordScreen {
             None => false,
         };
         if !self.on_wallpaper {
-            canvas.gradient(theme::BACKDROP, theme::BACKDROP_EDGE);
+            // Blitted from the cache, not drawn. See `PlainBackdrop`. The
+            // fallback is the same one the wallpaper has: a blit that will not
+            // fit is refused rather than half-done, and drawing the gradient
+            // directly is always correct, only slower.
+            let backdrop = self.backdrop.pixels(w as i32, h as i32);
+            if !canvas.blit(backdrop) {
+                canvas.gradient(theme::BACKDROP, theme::BACKDROP_EDGE);
+            }
         }
         let backdrop = if self.on_wallpaper {
             prepared.as_ref().map(|p| p.backdrop())
@@ -2162,6 +2225,58 @@ mod tests {
             data[0] > data[2],
             "the corner is {:?}, which is not a blue wallpaper",
             &data[..4]
+        );
+    }
+
+    /// The cached backdrop must be the gradient, byte for byte.
+    ///
+    /// This is the whole licence for blitting it instead of drawing it: if the
+    /// two ever differ, the screen on a machine with no wallpaper stops being
+    /// the screen that was designed, and nothing else would say so -- the
+    /// frame would still be a plausible dark backdrop.
+    #[test]
+    fn the_cached_backdrop_is_exactly_the_gradient() {
+        let (w, h) = (97, 61);
+        let mut drawn = vec![0u8; (w * h * 4) as usize];
+        {
+            let mut canvas = Canvas::new(&mut drawn, w, h);
+            canvas.gradient(theme::BACKDROP, theme::BACKDROP_EDGE);
+        }
+
+        let mut cached = PlainBackdrop::default();
+        assert_eq!(cached.pixels(w, h), drawn.as_slice());
+    }
+
+    /// A second frame at the same size must not redraw it -- that is the
+    /// point -- and a frame at a new size must not be served the old one.
+    ///
+    /// A stale buffer is refused by `Canvas::blit` rather than half-drawn, so
+    /// the failure this guards against is silent: the screen would look right
+    /// and quietly pay the gradient on every frame again.
+    #[test]
+    fn the_cached_backdrop_is_reused_and_follows_a_resize() {
+        let mut cached = PlainBackdrop::default();
+
+        let first = cached.pixels(64, 64).as_ptr();
+        assert_eq!(
+            cached.pixels(64, 64).as_ptr(),
+            first,
+            "the same size was re-rendered instead of reused"
+        );
+
+        let resized = cached.pixels(32, 96);
+        assert_eq!(
+            resized.len(),
+            32 * 96 * 4,
+            "a resize left a buffer the new frame cannot blit"
+        );
+        // The gradient runs top to bottom, so the last row is the edge colour.
+        // Within a step of it: the dither perturbs every pixel by half a step.
+        let last = resized.len() - 4;
+        assert!(
+            resized[last].abs_diff(theme::BACKDROP_EDGE.blue()) <= 1,
+            "the bottom of the resized backdrop is {:?}, not the edge colour",
+            &resized[last..]
         );
     }
 

@@ -242,6 +242,10 @@ struct Output {
     width: u32,
     height: u32,
     scale: f32,
+    /// Whether a `wl_surface.frame` callback is already waiting to be
+    /// signalled on this surface. See `draw`: without it, every keypress adds
+    /// one more full-screen redraw per frame, on every output, permanently.
+    frame_pending: bool,
 }
 
 struct Lock {
@@ -344,9 +348,19 @@ impl Lock {
 
         let surface = self.surfaces[index].surface.wl_surface().clone();
         surface.damage_buffer(0, 0, width, height);
-        // Unconditionally ask for another frame: the caret blinks and the clock
-        // ticks, so this surface is never static. The compositor paces it.
-        surface.frame(qh, FrameCallbackData(surface.clone()));
+        // Keep exactly one frame callback in flight on this surface -- never a
+        // second. The caret blinks and the clock ticks, so something has to
+        // keep asking for frames; but `draw` is reached from the frame callback
+        // *and* from every keypress, and callbacks queued by separate commits
+        // inside one refresh interval are all signalled together, each one
+        // drawing again and queueing another. Asking unconditionally therefore
+        // does not cost one extra redraw per keystroke, it permanently adds one
+        // redraw per frame per keystroke -- and on a lock screen that is one
+        // per keystroke per monitor. See the greeter, which had the same bug.
+        if !self.surfaces[index].frame_pending {
+            surface.frame(qh, FrameCallbackData(surface.clone()));
+            self.surfaces[index].frame_pending = true;
+        }
         if let Err(e) = buffer.attach_to(&surface) {
             tracing::error!("cannot attach the buffer: {e}");
             return;
@@ -408,6 +422,7 @@ impl Lock {
             width: 0,
             height: 0,
             scale: 1.0,
+            frame_pending: false,
         });
     }
 
@@ -812,6 +827,8 @@ impl CompositorHandler for Lock {
         _: u32,
     ) {
         if let Some(index) = self.index_of(surface) {
+            // Fired, so no longer pending: the draw queues the next one.
+            self.surfaces[index].frame_pending = false;
             self.draw(index, qh);
         }
     }
