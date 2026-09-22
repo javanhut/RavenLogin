@@ -623,6 +623,14 @@ impl PasswordScreen {
         if self.busy {
             return Action::None;
         }
+        // An empty field on the lock screen is not an attempt. It is almost
+        // always Enter pressed to wake a screen the compositor turned off, and
+        // sending it would spend one of the free attempts on the rate limiter.
+        // The login screen still submits it: `allow_empty_password` is a
+        // policy there, and deciding it is the daemon's job.
+        if self.mode == Mode::Lock && self.password.is_empty() {
+            return Action::None;
+        }
         if self.throttled_for(now).is_some() {
             // The countdown itself is drawn live under the field; this is the
             // reason for it, and the shove that says the key was refused.
@@ -1691,6 +1699,15 @@ mod tests {
             s.password.is_empty(),
             "the field should be empty after submit"
         );
+    }
+
+    #[test]
+    fn enter_on_an_empty_lock_screen_is_not_an_attempt() {
+        let mut s = PasswordScreen::locked(user("javan", 'J'));
+        assert!(matches!(s.submit(Instant::now()), Action::None));
+        assert!(!s.busy, "nothing is in flight");
+        s.push_char('x');
+        assert!(matches!(s.submit(Instant::now()), Action::Submit { .. }));
     }
 
     /// The property that stops a held Enter key from burning through the rate
