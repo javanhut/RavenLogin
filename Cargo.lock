@@ -462,6 +462,7 @@ dependencies = [
 [[package]]
 name = "huginn-crypt"
 version = "0.0.1"
+source = "git+https://github.com/javanhut/HuginnKeyring.git#4815ade836c05bcf39b058189c0457a7277c1876"
 dependencies = [
  "aes",
  "argon2",
@@ -480,6 +481,7 @@ dependencies = [
 [[package]]
 name = "huginn-wire"
 version = "0.0.1"
+source = "git+https://github.com/javanhut/HuginnKeyring.git#4815ade836c05bcf39b058189c0457a7277c1876"
 dependencies = [
  "huginn-crypt",
  "rustix",
