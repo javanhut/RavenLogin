@@ -54,7 +54,6 @@ pub fn advice(word: &str) -> &'static str {
 /// to get wrong.
 pub use raven_greet_proto::valid_account;
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

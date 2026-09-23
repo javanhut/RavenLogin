@@ -152,6 +152,13 @@ fn authenticate() -> bool {
     let Some(tty) = Tty::open() else {
         return false;
     };
+    // pam_exec put this in a session of its own, so the Ctrl-C that ends
+    // `sudo` never reaches it. Left alone it would outlive `sudo`, reading
+    // keys meant for the shell and putting back a terminal mode the shell has
+    // since changed. Going with the parent is the only way to know.
+    if !follow_parent() {
+        return false;
+    }
 
     let mut sensor = match Sensor::connect() {
         Ok(Some(sensor)) => sensor,
@@ -254,8 +261,7 @@ fn interactive() -> bool {
         return false;
     };
     let pid = parent.as_raw_nonzero();
-    let stdin_is_tty = std::fs::read_link(format!("/proc/{pid}/fd/0"))
-        .is_ok_and(|target| is_terminal_path(&target));
+    let stdin_is_tty = sudo_terminal().is_some();
     let args: Vec<String> = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|raw| {
             raw.split(|b| *b == 0)
@@ -265,6 +271,31 @@ fn interactive() -> bool {
         })
         .unwrap_or_default();
     stdin_is_tty && !non_interactive(&args)
+}
+
+/// The terminal `sudo` reads from, by its device path: where its standard
+/// input points, which this process may look at because it is root.
+fn sudo_terminal() -> Option<PathBuf> {
+    let parent = rustix::process::getppid()?;
+    let target = std::fs::read_link(format!("/proc/{}/fd/0", parent.as_raw_nonzero())).ok()?;
+    is_terminal_path(&target).then_some(target)
+}
+
+/// Ask for SIGTERM when `sudo` goes, which the handler `Tty::quiet` installs
+/// turns into restoring the terminal and exiting. `false` if that cannot be
+/// arranged, or if `sudo` is already gone.
+fn follow_parent() -> bool {
+    let Some(parent) = rustix::process::getppid() else {
+        return false;
+    };
+    if rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))
+        .is_err()
+    {
+        return false;
+    }
+    // The parent may have exited before the signal was asked for, in which
+    // case it will never come: this has already been handed to init.
+    rustix::process::getppid() == Some(parent)
 }
 
 fn is_terminal_path(target: &Path) -> bool {
@@ -307,13 +338,31 @@ struct Tty {
 }
 
 impl Tty {
+    /// `/dev/tty` when there is one, and otherwise `sudo`'s own terminal by
+    /// name.
+    ///
+    /// Run by hand, `/dev/tty` is it. Run by pam_exec, there is none: pam_exec
+    /// calls `setsid()` before running this, which leaves it without a
+    /// controlling terminal, and opening `/dev/tty` fails with ENXIO. The
+    /// device `sudo` reads from still works when opened by name, and
+    /// `O_NOCTTY` keeps that from making it this session's terminal.
     fn open() -> Option<Self> {
+        let by_name = || {
+            let path = sudo_terminal()?;
+            rustix::fs::open(
+                &path,
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .ok()
+        };
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
-            .ok()?;
-        Some(Self { file })
+            .ok()
+            .or_else(|| by_name().map(File::from))?;
+        rustix::termios::isatty(&file).then_some(Self { file })
     }
 
     fn say(&self, line: &str) {
