@@ -336,6 +336,8 @@ pub struct PasswordScreen {
     mode: Mode,
     /// Cross-fade instead of move; no shake, no pop, no lift.
     reduced_motion: bool,
+    /// Focus ring and caret. [`theme::ACCENT`] unless told otherwise.
+    accent: Color,
 
     // Presentation. None of this is read by anything but `draw`.
     last_frame: Option<Instant>,
@@ -408,6 +410,7 @@ impl PasswordScreen {
             backdrop: PlainBackdrop::default(),
             on_wallpaper: false,
             reduced_motion: false,
+            accent: theme::ACCENT,
             last_frame: None,
             presence: Spring::at(0.0, PRESENCE),
             shake: Spring::at(0.0, SHAKE),
@@ -436,6 +439,14 @@ impl PasswordScreen {
     /// with `None`.
     pub fn set_wallpaper(&mut self, wallpaper: Option<Wallpaper>) {
         self.wallpaper = wallpaper;
+    }
+
+    /// Draw the focus ring and caret in `accent` instead of
+    /// [`theme::ACCENT`]: the lock screen wears the accent its account chose
+    /// in Raven Settings. Only the accent follows it; everything else on this
+    /// screen is tuned against the dark scrim (see `theme`), which stays.
+    pub fn set_accent(&mut self, accent: Color) {
+        self.accent = accent;
     }
 
     /// Cross-fade instead of move.
@@ -1261,7 +1272,7 @@ impl PasswordScreen {
         // The field is focused whenever it will take a key. That is what the
         // ring says, and it is the only place the accent says anything.
         let focus = (1.0 - busy) * (1.0 - throttled) * alpha;
-        let state = theme::ACCENT.mix(theme::ERROR, error);
+        let state = self.accent.mix(theme::ERROR, error);
 
         // Halo, material, hairline. The halo sits outside the border and is
         // most of what changes when the field goes from ready to refused.
@@ -1282,7 +1293,7 @@ impl PasswordScreen {
         }
         canvas.material(rect, radius, backdrop, theme::MATERIAL.faded(alpha));
         let border = theme::MATERIAL_EDGE
-            .mix(theme::ACCENT.faded(0.85), focus * (1.0 - error))
+            .mix(self.accent.faded(0.85), focus * (1.0 - error))
             .mix(theme::ERROR.faded(0.9), error);
         canvas.rounded_rect_outline(rect, radius, s(theme::FIELD_BORDER), border.faded(alpha));
 
@@ -1342,7 +1353,7 @@ impl PasswordScreen {
                     s(16.0),
                 ),
                 s(0.75),
-                theme::ACCENT.faded(focus * blink),
+                self.accent.faded(focus * blink),
             );
         }
 

@@ -182,6 +182,9 @@ fn run() -> Result<()> {
         screen: {
             let mut screen = PasswordScreen::locked(user);
             screen.set_wallpaper(wallpaper);
+            if let Some(accent) = desktop_config::accent() {
+                screen.set_accent(accent);
+            }
             screen.set_reduced_motion(reduce_motion());
             screen
         },

@@ -53,6 +53,19 @@ impl Color {
         self.0 as u8
     }
 
+    /// An opaque colour from `#RRGGBB`, the form Raven Settings writes an
+    /// accent in. Anything else is `None`, for the caller to fall back on.
+    #[must_use]
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let digits = hex.trim().strip_prefix('#')?;
+        if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(digits, 16)
+            .ok()
+            .map(|rgb| Self(0xFF00_0000 | rgb))
+    }
+
     /// The same colour at a different opacity.
     #[must_use]
     pub const fn with_alpha(self, alpha: u8) -> Self {
@@ -150,7 +163,10 @@ pub const MATERIAL_EDGE: Color = Color::from_argb(0x2EFF_FFFF);
 /// Hairline borders on an opaque surface.
 pub const BORDER: Color = Color::from_argb(0xFF2A_2E45);
 
-/// Focus rings and the caret. huginn's `ACCENT`.
+/// Focus rings and the caret. huginn's `ACCENT`, and the default for the
+/// lock screen, which takes the account's accent from `desktop.toml` instead
+/// (see `PasswordScreen::set_accent`). The greeter runs before anyone has
+/// logged in, so it has no account to ask and always draws this.
 pub const ACCENT: Color = Color::from_argb(0xFF7A_A2F7);
 
 /// Ordinary text.
@@ -229,6 +245,17 @@ mod tests {
         assert_eq!(c.red(), 0x7A);
         assert_eq!(c.green(), 0xA2);
         assert_eq!(c.blue(), 0xF7);
+    }
+
+    #[test]
+    fn hex_parses_only_rrggbb() {
+        assert_eq!(Color::from_hex("#7AA2F7"), Some(ACCENT));
+        assert_eq!(Color::from_hex(" #f7768e "), Some(ERROR));
+        assert_eq!(Color::from_hex("7AA2F7"), None);
+        assert_eq!(Color::from_hex("#7AA2F"), None);
+        assert_eq!(Color::from_hex("#FF7AA2F7"), None);
+        assert_eq!(Color::from_hex("#GGGGGG"), None);
+        assert_eq!(Color::from_hex("red"), None);
     }
 
     #[test]
