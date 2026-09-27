@@ -157,6 +157,69 @@ pub const SURFACE: Color = Color::from_argb(0xFF1A_1B26);
 /// (over a scrimmed white one) both keep [`TEXT`] past 4.5:1.
 pub const MATERIAL: Color = SURFACE.with_alpha(0x8C);
 
+/// A glass theme other than Black, `appearance.glass_theme` in the account's
+/// `desktop.toml`: the compositor's glass ground and text (RavenGUI,
+/// `huginn-comp/src/theme.rs`), dark always, because this screen is dark
+/// whatever the desktop's mode.
+///
+/// Only the material follows it -- the field and the avatar, the two pieces
+/// of glass on the screen -- and the ink drawn on them. Everything outside
+/// the material is tuned against [`SCRIM`], which stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Glass {
+    ground: Color,
+    text: Color,
+}
+
+/// (value, dark ground, dark text). Black Glass is this file's own look.
+const GLASS_THEMES: [(&str, u32, u32); 4] = [
+    ("fog", 0xFF6E_7D94, 0xFFFF_FFFF),
+    ("arctic", 0xFF4F_7F9F, 0xFFFF_FFFF),
+    ("midnight", 0xFF0E_1630, 0xFFE8_EEFF),
+    ("rose", 0xFF5A_3A4E, 0xFFFF_F4F8),
+];
+
+impl Glass {
+    /// The glass theme Raven Settings wrote, in any of its spellings ("rose",
+    /// "Rose Glass", "rose-glass"). `None` for Black Glass and for a value
+    /// this build does not know, which the compositor also draws as black.
+    #[must_use]
+    pub fn named(theme: &str) -> Option<Self> {
+        let squashed: String = theme
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let want = squashed.strip_suffix("glass").unwrap_or(&squashed);
+        GLASS_THEMES
+            .iter()
+            .find(|t| t.0 == want)
+            .map(|&(_, ground, text)| Self {
+                ground: Color::from_argb(ground),
+                text: Color::from_argb(text),
+            })
+    }
+
+    /// [`MATERIAL`], in this glass: the ground at the material's opacity.
+    #[must_use]
+    pub const fn material(self) -> Color {
+        self.ground.with_alpha(MATERIAL.alpha())
+    }
+
+    /// [`TEXT`] on the material: the dots and the avatar's initial.
+    #[must_use]
+    pub const fn ink(self) -> Color {
+        self.text
+    }
+
+    /// The placeholder on the material. [`TEXT_DIM`] would
+    /// vanish into the lighter grounds; this is the ink, faded.
+    #[must_use]
+    pub fn dim(self) -> Color {
+        self.text.faded(0.6)
+    }
+}
+
 /// Where the material catches the light: a hairline at its edge.
 pub const MATERIAL_EDGE: Color = Color::from_argb(0x2EFF_FFFF);
 
@@ -372,6 +435,36 @@ mod tests {
     fn the_wallpaper_dim_is_still_dimmer_than_the_text() {
         assert!(luminance(TEXT_DIM_ON_WALLPAPER) < luminance(TEXT));
         assert!(luminance(TEXT_DIM_ON_WALLPAPER) > luminance(TEXT_DIM));
+    }
+
+    /// The glass ink has to stay text on its own material over any
+    /// wallpaper, as [`TEXT`] does on [`MATERIAL`].
+    #[test]
+    fn glass_ink_stays_readable_on_its_material() {
+        for theme in ["fog", "arctic", "midnight", "rose"] {
+            let glass = Glass::named(theme).unwrap();
+            for under in [scrimmed(0x00), scrimmed(0x80), scrimmed(0xFF), BACKDROP] {
+                let background = composite(under, glass.material());
+                let primary = contrast(glass.ink(), background);
+                assert!(primary >= 4.5, "{theme} ink is {primary:.2}:1");
+                let secondary = contrast(composite(background, glass.dim()), background);
+                assert!(secondary >= 3.0, "{theme} dim is {secondary:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn glass_accepts_every_spelling_and_black_is_none() {
+        for v in ["rose", "Rose Glass", "rose-glass"] {
+            assert_eq!(
+                Glass::named(v).map(Glass::material),
+                Some(Color::from_argb(0xFF5A_3A4E).with_alpha(MATERIAL.alpha())),
+                "{v}"
+            );
+        }
+        for v in ["", "black", "Black Glass", "sepia"] {
+            assert_eq!(Glass::named(v), None, "{v}");
+        }
     }
 
     #[test]

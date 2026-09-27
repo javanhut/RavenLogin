@@ -338,6 +338,8 @@ pub struct PasswordScreen {
     reduced_motion: bool,
     /// Focus ring and caret. [`theme::ACCENT`] unless told otherwise.
     accent: Color,
+    /// The account's glass theme, for the material. `None` is Black Glass.
+    glass: Option<theme::Glass>,
 
     // Presentation. None of this is read by anything but `draw`.
     last_frame: Option<Instant>,
@@ -411,6 +413,7 @@ impl PasswordScreen {
             on_wallpaper: false,
             reduced_motion: false,
             accent: theme::ACCENT,
+            glass: None,
             last_frame: None,
             presence: Spring::at(0.0, PRESENCE),
             shake: Spring::at(0.0, SHAKE),
@@ -443,10 +446,33 @@ impl PasswordScreen {
 
     /// Draw the focus ring and caret in `accent` instead of
     /// [`theme::ACCENT`]: the lock screen wears the accent its account chose
-    /// in Raven Settings. Only the accent follows it; everything else on this
-    /// screen is tuned against the dark scrim (see `theme`), which stays.
+    /// in Raven Settings. Only the accent and the glass (see
+    /// [`Self::set_glass`]) follow it; everything else on this screen is
+    /// tuned against the dark scrim (see `theme`), which stays.
     pub fn set_accent(&mut self, accent: Color) {
         self.accent = accent;
+    }
+
+    /// Tint the field and the avatar -- the material -- and the ink on them
+    /// in the account's glass theme, as the compositor tints its panels.
+    /// Like the accent, nothing off the material follows it.
+    pub fn set_glass(&mut self, glass: Option<theme::Glass>) {
+        self.glass = glass;
+    }
+
+    /// [`theme::MATERIAL`], or the glass theme's.
+    fn material(&self) -> Color {
+        self.glass.map_or(theme::MATERIAL, theme::Glass::material)
+    }
+
+    /// [`theme::TEXT`] where it sits on the material.
+    fn ink(&self) -> Color {
+        self.glass.map_or(theme::TEXT, theme::Glass::ink)
+    }
+
+    /// [`Self::dim`] where it sits on (or beside) the material.
+    fn material_dim(&self) -> Color {
+        self.glass.map_or_else(|| self.dim(), theme::Glass::dim)
     }
 
     /// Cross-fade instead of move.
@@ -1080,7 +1106,9 @@ impl PasswordScreen {
             );
             canvas.rounded_rect(Rect::new(0.0, 0.0, w, h), 0.0, colour);
 
-            let half = (s(FLASH_PANEL_WIDTH) / 2.0).min(w / 2.0 - s(8.0)).max(s(80.0));
+            let half = (s(FLASH_PANEL_WIDTH) / 2.0)
+                .min(w / 2.0 - s(8.0))
+                .max(s(80.0));
             let pad = s(FLASH_PANEL_PAD);
             // Two rows of small text below the field for the sensors, which
             // are exactly what is being drawn while a wash is up.
@@ -1202,7 +1230,7 @@ impl PasswordScreen {
             Rect::new(cx - radius, center_y - radius, radius * 2.0, radius * 2.0),
             radius,
             backdrop,
-            theme::MATERIAL.faded(frame.alpha),
+            self.material().faded(frame.alpha),
         );
         canvas.circle_outline(
             cx,
@@ -1227,7 +1255,7 @@ impl PasswordScreen {
             cx,
             center_y - s(theme::AVATAR_SIZE) * 0.62,
             initial_style.scaled(frame.scale),
-            theme::TEXT.faded(frame.alpha),
+            self.ink().faded(frame.alpha),
             Align::Center,
         );
 
@@ -1291,7 +1319,7 @@ impl PasswordScreen {
                 state.faded(halo),
             );
         }
-        canvas.material(rect, radius, backdrop, theme::MATERIAL.faded(alpha));
+        canvas.material(rect, radius, backdrop, self.material().faded(alpha));
         let border = theme::MATERIAL_EDGE
             .mix(self.accent.faded(0.85), focus * (1.0 - error))
             .mix(theme::ERROR.faded(0.9), error);
@@ -1320,7 +1348,7 @@ impl PasswordScreen {
                 cx,
                 center_y - s(theme::BODY_SIZE) * 0.62,
                 style.scaled(frame.scale),
-                self.dim().faded(ink_alpha * placeholder),
+                self.material_dim().faded(ink_alpha * placeholder),
                 Align::Center,
             );
         }
@@ -1335,7 +1363,7 @@ impl PasswordScreen {
                 cx + s(dot.x.value()),
                 center_y,
                 s(theme::DOT_RADIUS) * size,
-                theme::TEXT.faded(ink_alpha),
+                self.ink().faded(ink_alpha),
             );
         }
 
@@ -2213,7 +2241,11 @@ mod tests {
             now += Duration::from_millis(16);
             frame(&mut s, now);
         }
-        s.set_flash(Some(Flash { r: 0, g: 255, b: 64 }));
+        s.set_flash(Some(Flash {
+            r: 0,
+            g: 255,
+            b: 64,
+        }));
         frame(&mut s, now);
         s.set_flash(None);
         s.set_biometric(

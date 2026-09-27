@@ -52,8 +52,8 @@ mod finger;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use raven_ui::canvas::Canvas;
 use raven_greet_proto::Wash;
+use raven_ui::canvas::Canvas;
 use raven_ui::screen::{
     Action, Biometric, BiometricKind, BiometricPrompt, Message, MessageKind, PasswordScreen,
 };
@@ -185,6 +185,7 @@ fn run() -> Result<()> {
             if let Some(accent) = desktop_config::accent() {
                 screen.set_accent(accent);
             }
+            screen.set_glass(desktop_config::glass());
             screen.set_reduced_motion(reduce_motion());
             screen
         },
