@@ -172,11 +172,15 @@ pub struct Glass {
 }
 
 /// (value, dark ground, dark text). Black Glass is this file's own look.
-const GLASS_THEMES: [(&str, u32, u32); 4] = [
+const GLASS_THEMES: [(&str, u32, u32); 8] = [
     ("fog", 0xFF6E_7D94, 0xFFFF_FFFF),
     ("arctic", 0xFF4F_7F9F, 0xFFFF_FFFF),
     ("midnight", 0xFF0E_1630, 0xFFE8_EEFF),
     ("rose", 0xFF5A_3A4E, 0xFFFF_F4F8),
+    ("tokyoneon", 0xFF0A_1A14, 0xFFE6_FFF1),
+    ("clear", 0xFF1C_1F26, 0xFFFF_FFFF),
+    ("ember", 0xFF3A_2418, 0xFFFF_F3E8),
+    ("nebula", 0xFF24_163A, 0xFFF3_EAFF),
 ];
 
 impl Glass {
@@ -441,7 +445,16 @@ mod tests {
     /// wallpaper, as [`TEXT`] does on [`MATERIAL`].
     #[test]
     fn glass_ink_stays_readable_on_its_material() {
-        for theme in ["fog", "arctic", "midnight", "rose"] {
+        for theme in [
+            "fog",
+            "arctic",
+            "midnight",
+            "rose",
+            "tokyo-neon",
+            "clear",
+            "ember",
+            "nebula",
+        ] {
             let glass = Glass::named(theme).unwrap();
             for under in [scrimmed(0x00), scrimmed(0x80), scrimmed(0xFF), BACKDROP] {
                 let background = composite(under, glass.material());
